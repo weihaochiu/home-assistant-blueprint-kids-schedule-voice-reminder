@@ -1,53 +1,75 @@
 # Kids Schedule Voice Reminder — Design
 
-Version: v0.2.0
+Version: v0.3.0
 
 ## Model and compatibility
 
-The primary model is `children[] -> events[] -> schedules[] + reminders[]`.
-Children inherit `spoken_name || name` into each normalized Event participant.
-Child/Event/Reminder enabled flags apply at their own subtree. A named Child
-makes the primary model authoritative—even when disabled—so legacy data cannot
-unexpectedly play. With no named Child, v0.1 `events[]` is normalized once into
-the same `runtime_events` representation. Runtime IDs contain source, Child index,
-and Event index; indexes are ephemeral and are not persisted identifiers.
+The primary model remains `children[] -> events[] -> schedules[] + reminders[]`.
+Children inherit `spoken_name || name` into normalized Events. A named Child makes
+the primary model authoritative—even when disabled—so legacy data cannot play
+unexpectedly. With no named Child, v0.1 `events[]` is normalized into the same
+`runtime_events` representation. Runtime indexes are ephemeral, not persisted IDs.
 
-The nested Object selectors match the Home Assistant 2026.8.x selector schema:
-Object fields may contain any selector and `multiple: true` produces lists.
-Object selectors expose no reorder option, so source list order is authoritative.
+Object selectors follow the Home Assistant 2026.8.x recursive schema. The holiday
+source uses a normal select because Blueprint input sections cannot conditionally
+hide sibling inputs based on another input. Calendar entities are filtered by
+`domain: calendar`, deliberately not `integration: remote_calendar`, so other
+standards-compatible providers remain selectable.
 
-## Two-phase scheduler and boundaries
+## Queued two-phase scheduler
 
-The minute heartbeat captures `trigger.now`. Phase A scans every valid runtime
-Event using occurrence offsets `[-2, -1, 0, 1]`, uniformly for all five timing
-modes. D-2 is required for a Monday 23:00–Tuesday 01:00 overnight Event whose
-after-end offset is 1440 minutes and is due Wednesday 01:00. A key of runtime
-Child/Event identity, occurrence date, Reminder index, and due minute collapses
-duplicate Schedules while retaining independent items. Candidates sort by due,
-Child order, Event order, and Reminder order.
+The minute heartbeat captures `trigger.now`; automation mode is `queued`, `max: 20`.
+The no-candidate condition is the first action, not a top-level automation condition.
+This lets each admitted run retain its trigger context while serializing player
+snapshot, playback, and volume restoration.
 
-If Phase A is empty execution stops before Workday and media. Otherwise only
-unique occurrence offsets belonging to `skip` candidates are queried, through
-four fixed `workday.check_date` actions and response variables. This bounds calls
-at four and queries each occurrence date once. Phase B keeps `run`, keeps `skip`
-on boolean true, drops it on boolean false, and fails open for every missing,
-unavailable, error, wrong-key, or malformed response. If Phase B empties the list,
-execution stops before player snapshot, volume, and TTS.
+Phase A scans each Event at occurrence offsets `[-2, -1, 0, 1]` for all five timing
+modes. D-2 covers an overnight Event plus a 1440-minute after-end reminder. A key
+containing runtime Child/Event identity, occurrence date, Reminder index, and due
+minute collapses duplicate Schedules. Candidates sort by due, Child, Event, Reminder.
 
-A configured Workday entity takes priority. Only when blank does the legacy
-helper bridge apply v0.1 current-state `on + skip` behavior; unavailable is off.
+If Phase A is empty, execution stops before holiday and media actions. `run`
+candidates never need holiday data. Phase B filters only `skip` candidates against
+exactly one effective source and stops before media if the list becomes empty.
 
-## Migration
+## Holiday source architecture
 
-No script touches Home Assistant storage. Users first select a Taiwan Workday
-sensor, then manually recreate legacy Events beneath named Children/Groups.
-During migration, named Children are authoritative and legacy Events remain a
-non-executing fallback; removing all named Children re-enables the legacy adapter.
+`holiday_source` exposes `calendar`, `workday`, and `legacy`, with Workday as the
+upgrade default. A v0.2 compatibility adapter maps Workday + blank sensor + configured
+legacy helper to Legacy; otherwise sources do not read each other's state.
+
+Calendar path:
+
+1. Only when at least one raw candidate uses `skip`, the configured entity is
+   available, and Calendar is effective, call `calendar.get_events` once.
+2. Query local D-2 00:00 through D+2 00:00 (exclusive), enough for all candidate
+   occurrence dates.
+3. Read only the selected entity's `events` list. Parse date and date-time starts.
+4. Apply the ordered Google Taiwan classifier without a name whitelist.
+5. Drop a `skip` candidate only when its occurrence date is classified holiday.
+
+Workday path uses four fixed optional `workday.check_date` actions, one per unique
+candidate occurrence offset. A boolean `workday: false` drops `skip`; true keeps it.
+Legacy reads the helper's current `on` state. Every unavailable/action-error/
+undefined/wrong-key/malformed path fails open. The automation never invokes
+`homeassistant.update_entity`.
+
+## Response variables
+
+Service responses are consumed by one following Variables action with explicit
+`is defined`, mapping, key, collection, and boolean guards. This matches Home
+Assistant Core 2026.8.1 script execution; see
+[HA_RESPONSE_VARIABLE_COMPATIBILITY.md](HA_RESPONSE_VARIABLE_COMPATIBILITY.md).
 
 ## Messages and media
 
-Reminder messages are private lists: zero valid entries uses fallback, one is
-fixed, and many use `random`. Six placeholders are replaced literally and never
-re-evaluated as Jinja. Available player volumes snapshot/set once, all reminders
-play sequentially, bounded waits reduce overlap, and numeric volumes restore once.
-Media announcement/resume remains best effort.
+Zero valid messages uses fallback, one is fixed, and many use `random`. Six
+placeholders are replaced literally and never re-evaluated as Jinja. Available
+player volumes snapshot/set once, all reminders play sequentially, waits are bounded,
+and numeric volumes restore once. Media announcement/resume remains best effort.
+
+## Scope boundaries
+
+This is a weekly reminder Blueprint, not a general calendar scheduler. It does not
+model school calendars, vacations, one-off calendar Events, typhoon days, GPS,
+push notifications, storage migration, or persistent deduplication.

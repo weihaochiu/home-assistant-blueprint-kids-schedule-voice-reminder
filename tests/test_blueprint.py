@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 import importlib
 from pathlib import Path
 import re
@@ -331,6 +331,33 @@ def find_matches(
     )
 
 
+def calendar_event_date(value: object) -> date | None:
+    """Parse Home Assistant calendar date and date-time response values."""
+    if not isinstance(value, str) or len(value.strip()) < 10:
+        return None
+    try:
+        return date.fromisoformat(value.strip()[:10])
+    except ValueError:
+        return None
+
+
+def is_google_taiwan_holiday(event: object) -> bool:
+    """Independent implementation of the documented ordered classifier."""
+    if not isinstance(event, dict):
+        return False
+    summary = str(event.get("summary") or "")
+    description = str(event.get("description") or "")
+    if "補行上班" in summary or "補班" in summary:
+        return False
+    if "國定假日" in description:
+        return True
+    if "補假" in summary:
+        return True
+    if "假日節慶" in description:
+        return False
+    return False
+
+
 def render_blueprint_matches(
     blueprint: dict,
     events: list[dict],
@@ -338,10 +365,13 @@ def render_blueprint_matches(
     holiday_on: bool = False,
     *,
     children: list[dict] | None = None,
+    holiday_source: str = "workday",
+    calendar_entity: str = "calendar.taiwan_holidays",
+    calendar_response: object | None = None,
     workday_entity: str = "",
     workday_responses: dict[int, object] | None = None,
 ) -> list[dict]:
-    """Render the actual v0.2 normalization, candidate, and policy templates."""
+    """Render the actual Blueprint normalization, candidate, and policy templates."""
     epoch = datetime(1970, 1, 1)
 
     def as_datetime(value):
@@ -372,11 +402,20 @@ def render_blueprint_matches(
         context[name] = environment.from_string(blueprint["variables"][name]).render(**context)
     context.update(
         {
+            "holiday_calendar_entity_input": calendar_entity,
+            "effective_holiday_source": (
+                "legacy"
+                if holiday_source == "workday" and not workday_entity and holiday_on
+                else holiday_source
+            ),
             "workday_entity_input": workday_entity,
-            "workday_configured": bool(workday_entity),
-            "legacy_holiday_active": holiday_on and not workday_entity,
+            "workday_configured": holiday_source == "workday" and bool(workday_entity),
+            "legacy_holiday_active": holiday_source == "legacy" and holiday_on
+            or holiday_source == "workday" and not workday_entity and holiday_on,
         }
     )
+    if calendar_response is not None:
+        context["holiday_calendar_response"] = calendar_response
     responses = workday_responses or {}
     for offset, variable in {
         -2: "workday_response_minus_2",
@@ -396,23 +435,23 @@ def test_yaml_loads_and_metadata_is_correct(blueprint: dict) -> None:
     assert metadata["author"] == "weihaochiu"
     assert metadata["source_url"] == SOURCE_URL
     assert metadata["homeassistant"]["min_version"] == "2026.1.0"
-    assert "v0.2.0" in metadata["name"]
-    assert "v0.2.0" in metadata["description"]
+    assert "v0.3.0" in metadata["name"]
+    assert "v0.3.0" in metadata["description"]
 
 
 def test_version_is_consistent_across_release_surfaces(blueprint: dict) -> None:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    assert version == "v0.2.0"
+    assert version == "v0.3.0"
     for filename in ("README.md", "README.zh-TW.md", "CHANGELOG.md"):
         assert version in (ROOT / filename).read_text(encoding="utf-8")
     assert version in blueprint["blueprint"]["name"]
-    assert version in next(iter(blueprint["blueprint"]["input"].values()))["description"]
+    assert version in blueprint["blueprint"]["description"]
 
 
 def test_input_sections_and_references(blueprint: dict) -> None:
     tree = blueprint["blueprint"]["input"]
     assert list(tree) == [
-        "workday_section",
+        "holiday_section",
         "playback_section",
         "children_section",
         "legacy_section",
@@ -472,12 +511,20 @@ def test_player_tts_and_holiday_selectors(blueprint: dict) -> None:
     assert inputs["workday_entity"]["selector"]["entity"]["filter"] == [
         {"integration": "workday", "domain": "binary_sensor"}
     ]
+    assert inputs["holiday_source"]["default"] == "workday"
+    options = inputs["holiday_source"]["selector"]["select"]["options"]
+    assert [item["value"] for item in options] == ["calendar", "workday", "legacy"]
+    assert inputs["holiday_calendar_entity"]["default"] == ""
+    assert inputs["holiday_calendar_entity"]["selector"]["entity"]["filter"] == [
+        {"domain": "calendar"}
+    ]
 
 
 def test_modern_heartbeat_and_fixed_trigger_minute(blueprint: dict, blueprint_text: str) -> None:
     assert blueprint["triggers"] == [{"trigger": "time_pattern", "minutes": "/1", "id": "heartbeat"}]
-    assert blueprint["mode"] == "parallel"
-    assert blueprint["max"] == 10
+    assert blueprint["mode"] == "queued"
+    assert blueprint["max"] == 20
+    assert blueprint["max_exceeded"] == "warning"
     assert "trigger.now" in blueprint["variables"]["check_time"]
     assert "check_minute" in blueprint["variables"]
     assert "platform:" not in blueprint_text
@@ -840,6 +887,211 @@ def test_workday_actions_are_fixed_deduplicated_and_fail_open(blueprint: dict) -
     assert "unique" in blueprint["variables"]["workday_query_offsets"]
 
 
+def test_calendar_classifier_priority_and_fixture_examples(fixtures: dict) -> None:
+    events = fixtures["calendar_events"]
+    assert is_google_taiwan_holiday(events["national_holiday"]) is True
+    assert is_google_taiwan_holiday(events["national_holiday_datetime"]) is True
+    assert is_google_taiwan_holiday(events["makeup_workday"]) is False
+    assert is_google_taiwan_holiday(events["observance"]) is False
+    assert is_google_taiwan_holiday(events["unknown"]) is False
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("2026-02-28", date(2026, 2, 28)),
+        ("2026-10-09T00:00:00+08:00", date(2026, 10, 9)),
+        ("2026-02-30", None),
+        ("bad", None),
+        (None, None),
+    ],
+)
+def test_calendar_event_date_accepts_dates_and_datetimes(value, expected) -> None:
+    assert calendar_event_date(value) == expected
+
+
+def test_calendar_makeup_workday_marker_wins_over_holiday_description() -> None:
+    event = {
+        "summary": "春節補班",
+        "description": "國定假日與假日節慶",
+    }
+    assert is_google_taiwan_holiday(event) is False
+
+
+def test_actual_calendar_holiday_filters_occurrence_date(blueprint: dict) -> None:
+    entity = "calendar.taiwan_holidays"
+    response = {
+        entity: {
+            "events": [{
+                "start": "2026-08-18",
+                "end": "2026-08-19",
+                "summary": "測試國定假日",
+                "description": "國定假日",
+            }]
+        }
+    }
+    matches = render_blueprint_matches(
+        blueprint,
+        [],
+        datetime(2026, 8, 18, 17, 0),
+        children=[child("姐姐", [simple_event()])],
+        holiday_source="calendar",
+        calendar_entity=entity,
+        calendar_response=response,
+    )
+    assert matches == []
+
+
+def test_calendar_previous_day_reminder_uses_event_occurrence_date(blueprint: dict) -> None:
+    entity = "calendar.taiwan_holidays"
+    timing = {"active_choice": "前一天固定時間", "前一天固定時間": {"time": "20:50:00"}}
+    response = {
+        entity: {
+            "events": [{
+                "start": "2026-08-18T00:00:00+08:00",
+                "end": "2026-08-19T00:00:00+08:00",
+                "summary": "測試補假",
+                "description": "國定假日",
+            }]
+        }
+    }
+    assert render_blueprint_matches(
+        blueprint,
+        [],
+        datetime(2026, 8, 17, 20, 50),
+        children=[child("姐姐", [simple_event(timing=timing)])],
+        holiday_source="calendar",
+        calendar_entity=entity,
+        calendar_response=response,
+    ) == []
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        None,
+        {},
+        {"wrong.entity": {"events": []}},
+        {"calendar.taiwan_holidays": {}},
+        {"calendar.taiwan_holidays": {"events": "bad"}},
+        {"calendar.taiwan_holidays": {"events": [{"start": "bad"}]}},
+    ],
+)
+def test_calendar_missing_malformed_or_wrong_key_fails_open(blueprint: dict, response) -> None:
+    matches = render_blueprint_matches(
+        blueprint,
+        [],
+        datetime(2026, 8, 18, 17, 0),
+        children=[child("姐姐", [simple_event()])],
+        holiday_source="calendar",
+        calendar_response=response,
+    )
+    assert len(matches) == 1
+
+
+def test_calendar_observance_and_unknown_events_do_not_suppress(blueprint: dict, fixtures: dict) -> None:
+    entity = "calendar.taiwan_holidays"
+    response = {entity: {"events": [
+        fixtures["calendar_events"]["observance"] | {"start": "2026-08-18"},
+        fixtures["calendar_events"]["unknown"],
+    ]}}
+    matches = render_blueprint_matches(
+        blueprint,
+        [],
+        datetime(2026, 8, 18, 17, 0),
+        children=[child("姐姐", [simple_event()])],
+        holiday_source="calendar",
+        calendar_entity=entity,
+        calendar_response=response,
+    )
+    assert len(matches) == 1
+
+
+def test_calendar_run_policy_ignores_holiday(blueprint: dict) -> None:
+    entity = "calendar.taiwan_holidays"
+    response = {entity: {"events": [{
+        "start": "2026-08-18", "summary": "假日", "description": "國定假日"
+    }]}}
+    matches = render_blueprint_matches(
+        blueprint,
+        [],
+        datetime(2026, 8, 18, 17, 0),
+        children=[child("姐姐", [simple_event(policy="run")])],
+        holiday_source="calendar",
+        calendar_entity=entity,
+        calendar_response=response,
+    )
+    assert len(matches) == 1
+
+
+def test_three_holiday_source_modes_are_mutually_exclusive(blueprint: dict) -> None:
+    entity = "binary_sensor.taiwan_workday"
+    calendar_entity = "calendar.taiwan_holidays"
+    event = simple_event()
+    calendar_nonholiday = {calendar_entity: {"events": [{
+        "start": "2026-08-18", "summary": "節慶", "description": "假日節慶"
+    }]}}
+    common = dict(
+        blueprint=blueprint,
+        events=[],
+        check=datetime(2026, 8, 18, 17, 0),
+        children=[child("姐姐", [event])],
+        calendar_entity=calendar_entity,
+        calendar_response=calendar_nonholiday,
+        workday_entity=entity,
+        workday_responses={0: {entity: {"workday": False}}},
+    )
+    # Calendar ignores the conflicting Workday=false and legacy=on signals.
+    assert len(render_blueprint_matches(**common, holiday_source="calendar", holiday_on=True)) == 1
+    # Workday ignores the non-holiday calendar and legacy signal.
+    assert render_blueprint_matches(**common, holiday_source="workday", holiday_on=True) == []
+    # Legacy=off ignores both external sources.
+    assert len(render_blueprint_matches(**common, holiday_source="legacy", holiday_on=False)) == 1
+
+
+def test_calendar_action_is_single_bounded_fail_open_call(blueprint: dict, blueprint_text: str) -> None:
+    calendar_calls = [
+        node for node in walk(blueprint["actions"])
+        if isinstance(node, dict) and node.get("action") == "calendar.get_events"
+    ]
+    assert len(calendar_calls) == 1
+    call = calendar_calls[0]
+    assert call["response_variable"] == "holiday_calendar_response"
+    assert call["continue_on_error"] is True
+    assert call["data"] == {
+        "start_date_time": "{{ calendar_range_start }}",
+        "end_date_time": "{{ calendar_range_end }}",
+    }
+    assert "timedelta(days=2)" in blueprint["variables"]["calendar_range_start"]
+    assert "timedelta(days=2)" in blueprint["variables"]["calendar_range_end"]
+    assert "skip_candidate_count" in blueprint["variables"]["calendar_query_enabled"]
+    assert "homeassistant.update_entity" not in blueprint_text
+
+
+@pytest.mark.parametrize(
+    ("raw_candidates", "entity_state", "expected"),
+    [
+        ([], "off", False),
+        ([{"non_workday_behavior": "run"}], "off", False),
+        ([{"non_workday_behavior": "skip"}], "off", True),
+        ([{"non_workday_behavior": "skip"}], "unavailable", False),
+    ],
+)
+def test_actual_calendar_query_gate_only_allows_available_skip_candidates(
+    blueprint: dict, raw_candidates: list[dict], entity_state: str, expected: bool
+) -> None:
+    environment = NativeEnvironment(autoescape=False)
+    environment.globals["states"] = lambda _entity: entity_state
+    context = {
+        "raw_candidates": raw_candidates,
+        "effective_holiday_source": "calendar",
+        "holiday_calendar_entity_input": "calendar.taiwan_holidays",
+    }
+    for name in ("skip_candidate_count", "calendar_configured", "calendar_query_enabled"):
+        context[name] = environment.from_string(blueprint["variables"][name]).render(**context)
+    assert context["calendar_query_enabled"] is expected
+
+
 @pytest.mark.parametrize(
     ("timing", "check", "response_offset"),
     [
@@ -887,13 +1139,14 @@ def test_nested_selectors_follow_official_recursive_shape(blueprint: dict) -> No
         validate(item["selector"])
 
 
-def test_no_candidate_gate_precedes_all_workday_actions(blueprint: dict) -> None:
-    assert blueprint["conditions"] == [{
-        "alias": "Phase A 沒有候選時不查 Workday、不改音量、不播放",
+def test_no_candidate_gate_is_first_queued_action(blueprint: dict) -> None:
+    assert "conditions" not in blueprint
+    assert blueprint["actions"][0] == {
+        "alias": "Phase A 沒有候選時不查假日來源、不改音量、不播放",
         "condition": "template",
         "value_template": "{{ raw_candidates | count > 0 }}",
-    }]
-    assert "Workday 篩選後沒有提醒時不碰播放器或 TTS" in str(blueprint["actions"])
+    }
+    assert "假日來源篩選後沒有提醒時不碰播放器或 TTS" in str(blueprint["actions"])
 
 
 def test_runtime_candidate_key_contains_child_event_occurrence_reminder_and_due(
@@ -907,7 +1160,7 @@ def test_runtime_candidate_key_contains_child_event_occurrence_reminder_and_due(
 
 
 def test_playback_snapshots_once_plays_all_then_restores_once(blueprint: dict, blueprint_text: str) -> None:
-    assert "raw_candidates | count > 0" in blueprint["conditions"][0]["value_template"]
+    assert "raw_candidates | count > 0" in blueprint["actions"][0]["value_template"]
     assert "matched_reminders | count > 0" in blueprint_text
     assert "for player in media_players_input" in blueprint_text
     assert "states(player) not in ['unknown', 'unavailable']" in blueprint_text
@@ -937,7 +1190,7 @@ def test_invalid_or_empty_event_data_fails_safe(bad_events) -> None:
 
 
 def test_scope_and_privacy_scan(blueprint_text: str) -> None:
-    for forbidden in ("AmazingTalker", "calendar.get_events", "Google Calendar", "寒假", "暑假", "補課"):
+    for forbidden in ("AmazingTalker", "OpenData", "OAuth", "寒假", "暑假", "颱風假", "補課"):
         assert forbidden not in blueprint_text
     assert not re.search(r"(?:token|password)\s*:", blueprint_text, re.IGNORECASE)
     assert not re.search(r"input_boolean\.[a-z0-9_]", blueprint_text)
@@ -976,6 +1229,29 @@ def test_github_actions_runs_all_required_validation() -> None:
     assert "python -m yamllint ." in workflow
     assert "python -m pytest -q" in workflow
     assert "git diff --check" in workflow
+
+
+def test_response_variables_are_guarded_and_compatibility_is_documented(
+    blueprint: dict, blueprint_text: str
+) -> None:
+    response_variables = [
+        node["response_variable"] for node in walk(blueprint["actions"])
+        if isinstance(node, dict) and "response_variable" in node
+    ]
+    assert response_variables == [
+        "holiday_calendar_response",
+        "workday_response_minus_2",
+        "workday_response_minus_1",
+        "workday_response_same",
+        "workday_response_plus_1",
+    ]
+    assert "is defined" in find_variable_template(blueprint["actions"], "matched_reminders")
+    assert blueprint_text.count("continue_on_error: true") >= len(response_variables)
+    compatibility = ROOT / "docs" / "HA_RESPONSE_VARIABLE_COMPATIBILITY.md"
+    assert compatibility.exists()
+    text = compatibility.read_text(encoding="utf-8")
+    for needle in ("2026.8.1", "#178410", "workday.check_date", "calendar.get_events"):
+        assert needle in text
 
 
 def test_backup_zip_manifest_exclusions_verification_and_retention(

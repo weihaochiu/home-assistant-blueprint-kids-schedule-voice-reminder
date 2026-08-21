@@ -1,8 +1,9 @@
 blueprint:
-  name: Kids Schedule Voice Reminder（小孩行程與接送語音提醒）· v0.2.0
+  name: Kids Schedule Voice Reminder（小孩行程與接送語音提醒）· v0.3.0
   description: >-
-    版本：v0.2.0。最低 Home Assistant：2026.1.0。以動態 Children／群組、Events、
-    時段與提醒管理行程；依 Workday 活動發生日處理非工作日，並相容 v0.1 Events。
+    版本：v0.3.0。最低 Home Assistant：2026.1.0。以動態 Children／群組、Events、
+    時段與提醒管理行程；可選 Calendar、Workday 或舊 helper 判斷活動發生日是否放假，
+    並相容 v0.2 與 v0.1 Events。
   domain: automation
   author: weihaochiu
   source_url: >-
@@ -10,16 +11,39 @@ blueprint:
   homeassistant:
     min_version: 2026.1.0
   input:
-    workday_section:
-      name: 📅 Workday／非工作日
+    holiday_section:
+      name: 📅 假日來源／活動日政策
       icon: mdi:calendar-check
       description: >-
-        v0.2.0 查詢活動發生日（不是播報日）。查詢失敗、實體不可用或回傳缺漏時採 fail-open；
-        沒有候選提醒時不呼叫 Workday action。
+        查詢活動發生日（不是播報日）。三種來源互斥；查詢失敗、實體不可用或回傳缺漏時
+        採 fail-open。新安裝建議 Calendar；升級預設 Workday 以保持 v0.2 行為。
       input:
+        holiday_source:
+          name: 假日來源
+          description: Calendar、Workday 與 Legacy 只會執行選定的一種。
+          default: workday
+          selector:
+            select:
+              custom_value: false
+              mode: dropdown
+              options:
+                - {label: Calendar（新安裝建議）, value: calendar}
+                - {label: Workday（v0.2 升級預設）, value: workday}
+                - {label: Legacy helper（v0.1 相容）, value: legacy}
+        holiday_calendar_entity:
+          name: 假日日曆實體（Calendar 模式）
+          description: >-
+            建議使用 Remote Calendar 匯入 Google 台灣假日日曆。只依事件內容分類；
+            日曆內有事件不代表一定放假。非 Calendar 模式不會查詢。
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: calendar
         workday_entity:
-          name: Workday 實體（建議）
-          description: 留空才使用 v0.1 補假 helper；兩者都有設定時以 Workday 為準。
+          name: Workday 實體（Workday 模式）
+          description: >-
+            Workday 模式使用；留空且舊補假 helper 有設定時，會保留 v0.2 的相容橋接。
           default: ""
           selector:
             entity:
@@ -209,7 +233,8 @@ blueprint:
       input:
         makeup_holiday_entity:
           name: 舊補假開關（相容橋接）
-          description: 選填；只在 Workday 留空時使用，unknown／unavailable 視為 off。
+          description: >-
+            Legacy 模式使用；另保留 v0.2「Workday 留空」的升級橋接。unknown／unavailable 視為 off。
           default: ""
           selector:
             entity:
@@ -270,13 +295,15 @@ blueprint:
           selector:
             number: {min: 0, max: 60, step: 1, mode: box}
 
-mode: parallel
-max: 10
+mode: queued
+max: 20
 max_exceeded: warning
 triggers:
   - {trigger: time_pattern, minutes: /1, id: heartbeat}
 
 variables:
+  holiday_source_input: !input holiday_source
+  holiday_calendar_entity_input: !input holiday_calendar_entity
   workday_entity_input: !input workday_entity
   makeup_holiday_entity_input: !input makeup_holiday_entity
   media_players_input: !input media_players
@@ -433,24 +460,60 @@ variables:
         {%- endfor -%}
       {%- endif -%}
     {%- endfor -%}{{- ns.items | sort(attribute='sort_key') | list -}}
-  workday_configured: "{{ workday_entity_input | string | trim | length > 0 }}"
-  workday_query_enabled: "{{ workday_configured and states(workday_entity_input) not in ['unknown', 'unavailable'] }}"
+  holiday_source: >-
+    {{ holiday_source_input if holiday_source_input in ['calendar', 'workday', 'legacy'] else 'workday' }}
+  legacy_compat_fallback: >-
+    {{ holiday_source == 'workday' and workday_entity_input | string | trim | length == 0
+      and makeup_holiday_entity_input | string | trim | length > 0 }}
+  effective_holiday_source: >-
+    {{ 'legacy' if legacy_compat_fallback else holiday_source }}
+  skip_candidate_count: >-
+    {{ raw_candidates | selectattr('non_workday_behavior', 'eq', 'skip') | list | count }}
+  calendar_configured: >-
+    {{ effective_holiday_source == 'calendar'
+      and holiday_calendar_entity_input | string | trim | length > 0 }}
+  calendar_query_enabled: >-
+    {{ calendar_configured and skip_candidate_count | int > 0
+      and states(holiday_calendar_entity_input) not in ['unknown', 'unavailable'] }}
+  workday_configured: >-
+    {{ effective_holiday_source == 'workday'
+      and workday_entity_input | string | trim | length > 0 }}
+  workday_query_enabled: >-
+    {{ workday_configured and states(workday_entity_input) not in ['unknown', 'unavailable'] }}
   workday_query_offsets: >-
     {{ raw_candidates | selectattr('non_workday_behavior', 'eq', 'skip')
       | map(attribute='occurrence_offset') | unique | sort | list }}
   legacy_holiday_active: >-
-    {{ not workday_configured and makeup_holiday_entity_input | string | trim | length > 0
+    {{ effective_holiday_source == 'legacy'
+      and makeup_holiday_entity_input | string | trim | length > 0
       and is_state(makeup_holiday_entity_input, 'on') }}
+  calendar_range_start: >-
+    {{ (as_local(as_datetime(check_minute | int)).replace(hour=0, minute=0, second=0, microsecond=0)
+      - timedelta(days=2)).isoformat() }}
+  calendar_range_end: >-
+    {{ (as_local(as_datetime(check_minute | int)).replace(hour=0, minute=0, second=0, microsecond=0)
+      + timedelta(days=2)).isoformat() }}
   workday_date_minus_2: "{{ (as_local(as_datetime(check_minute | int)).date() - timedelta(days=2)) | string }}"
   workday_date_minus_1: "{{ (as_local(as_datetime(check_minute | int)).date() - timedelta(days=1)) | string }}"
   workday_date_same: "{{ as_local(as_datetime(check_minute | int)).date() | string }}"
   workday_date_plus_1: "{{ (as_local(as_datetime(check_minute | int)).date() + timedelta(days=1)) | string }}"
 
-conditions:
-  - alias: Phase A 沒有候選時不查 Workday、不改音量、不播放
+actions:
+  - alias: Phase A 沒有候選時不查假日來源、不改音量、不播放
     condition: template
     value_template: "{{ raw_candidates | count > 0 }}"
-actions:
+  - alias: 每個 heartbeat 最多查詢一次 Calendar（D-2 00:00 至 D+2 00:00）
+    if:
+      - condition: template
+        value_template: "{{ calendar_query_enabled }}"
+    then:
+      - action: calendar.get_events
+        target: {entity_id: "{{ holiday_calendar_entity_input }}"}
+        data:
+          start_date_time: "{{ calendar_range_start }}"
+          end_date_time: "{{ calendar_range_end }}"
+        response_variable: holiday_calendar_response
+        continue_on_error: true
   - &workday_minus_2
     alias: 每個候選活動發生日最多查詢一次 Workday（D-2）
     if:
@@ -494,11 +557,38 @@ actions:
         continue_on_error: true
   - variables:
       matched_reminders: >-
+        {%- set calendar_response = holiday_calendar_response
+          if holiday_calendar_response is defined and holiday_calendar_response is mapping else {} -%}
+        {%- set calendar_result = calendar_response.get(holiday_calendar_entity_input, {})
+          if calendar_response is mapping else {} -%}
+        {%- set calendar_events = calendar_result.get('events', [])
+          if calendar_result is mapping else [] -%}
+        {%- set calendar_events = calendar_events if calendar_events is iterable
+          and calendar_events is not string and calendar_events is not mapping else [] -%}
+        {%- set holidays = namespace(dates=[]) -%}
+        {%- for event in calendar_events if event is mapping -%}
+          {%- set summary = event.get('summary', '') | string -%}
+          {%- set description = event.get('description', '') | string -%}
+          {%- set start = event.get('start', '') | string | trim -%}
+          {%- set date_key = start[0:10] -%}
+          {%- set parts = date_key.split('-') -%}
+          {%- set valid_date = parts | count == 3 and date_key | length == 10
+            and parts[0] | int(-1) >= 1 and 1 <= parts[1] | int(-1) <= 12
+            and 1 <= parts[2] | int(-1) <= 31 -%}
+          {%- set makeup_workday = '補行上班' in summary or '補班' in summary -%}
+          {%- set holiday = not makeup_workday and
+            ('國定假日' in description or '補假' in summary) -%}
+          {%- if valid_date and holiday and date_key not in holidays.dates -%}
+            {%- set holidays.dates = holidays.dates + [date_key] -%}
+          {%- endif -%}
+        {%- endfor -%}
         {%- set ns = namespace(items=[]) -%}
         {%- for item in raw_candidates -%}
           {%- set keep = true -%}
           {%- if item.non_workday_behavior == 'skip' -%}
-            {%- if workday_configured -%}
+            {%- if effective_holiday_source == 'calendar' -%}
+              {%- if item.occurrence_date in holidays.dates -%}{%- set keep = false -%}{%- endif -%}
+            {%- elif effective_holiday_source == 'workday' and workday_configured -%}
               {%- if item.occurrence_offset == -2 -%}
                 {%- set response = workday_response_minus_2 if workday_response_minus_2 is defined else {} -%}
               {%- elif item.occurrence_offset == -1 -%}
@@ -512,11 +602,13 @@ actions:
               {%- if result is mapping and result.get('workday') is boolean -%}
                 {%- set keep = result.get('workday') -%}
               {%- endif -%}
-            {%- elif legacy_holiday_active -%}{%- set keep = false -%}{%- endif -%}
+            {%- elif effective_holiday_source == 'legacy' and legacy_holiday_active -%}
+              {%- set keep = false -%}
+            {%- endif -%}
           {%- endif -%}
           {%- if keep -%}{%- set ns.items = ns.items + [item] -%}{%- endif -%}
         {%- endfor -%}{{- ns.items | sort(attribute='sort_key') | list -}}
-  - alias: Workday 篩選後沒有提醒時不碰播放器或 TTS
+  - alias: 假日來源篩選後沒有提醒時不碰播放器或 TTS
     condition: template
     value_template: "{{ matched_reminders | count > 0 }}"
   - alias: TTS 實體暫時不可用時安全跳過

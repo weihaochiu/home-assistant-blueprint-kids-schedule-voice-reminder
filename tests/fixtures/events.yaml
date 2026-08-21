@@ -118,3 +118,30 @@ duplicate_schedules:
             minutes: 30
         messages:
           - message: "重複時段只應播放一次。"
+
+calendar_events:
+  national_holiday:
+    start: "2026-02-28"
+    end: "2026-03-01"
+    summary: 和平紀念日
+    description: 國定假日
+  national_holiday_datetime:
+    start: "2026-10-09T00:00:00+08:00"
+    end: "2026-10-10T00:00:00+08:00"
+    summary: 中華民國國慶日 補假
+    description: 國定假日
+  makeup_workday:
+    start: "2026-02-07"
+    end: "2026-02-08"
+    summary: 農曆春節 補行上班
+    description: 國定假日
+  observance:
+    start: "2026-03-08"
+    end: "2026-03-09"
+    summary: 婦女節
+    description: 假日節慶
+  unknown:
+    start: "2026-08-18"
+    end: "2026-08-19"
+    summary: 自訂事件
+    description: 一般記事

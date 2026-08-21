@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here.
 
+## v0.3.0 - 2026-08-21
+
+### Added
+
+- Mutually exclusive Calendar, Workday, and Legacy holiday-source modes; Workday remains the upgrade default and Calendar is recommended for new installations.
+- One bounded `calendar.get_events` query per heartbeat with Google Taiwan holiday classification based on event metadata and occurrence date.
+- Google public ICS research, Remote Calendar setup instructions, and Home Assistant 2026.8.1 response-variable compatibility evidence.
+
+### Fixed
+
+- Playback concurrency changed from parallel to a 20-run queue, with the raw-candidate guard moved into actions so admitted trigger context is preserved.
+- Calendar and Workday responses now share explicit undefined, wrong-key, malformed-response, unavailable-entity, and action-error fail-open behavior.
+
+### Changed
+
+- Holiday filtering is source-selective and only evaluates `skip` Events; `run` Events remain independent of holiday data.
+- Documentation and tests now distinguish actual national holidays, makeup workdays, cultural observances, and unknown calendar events.
+
 ## v0.2.0 - 2026-08-21
 
 ### Added
