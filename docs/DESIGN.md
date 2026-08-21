@@ -16,6 +16,15 @@ hide sibling inputs based on another input. Calendar entities are filtered by
 `domain: calendar`, deliberately not `integration: remote_calendar`, so other
 standards-compatible providers remain selectable.
 
+Nested Object selector fields use only `label`, `required`, and `selector`, matching
+Core 2026.8.1. Selector-level options such as `multiple`, `label_field`, and
+`description_field` remain on the Object selector config rather than its fields.
+Children and Legacy deliberately share the `reminders_selector` YAML anchor, so the
+same validated Messages schema serves both paths. An offline recursive validator and
+positive/negative pytest regressions enforce this schema before release.
+Schema source:
+https://github.com/home-assistant/core/blob/2026.8.1/homeassistant/helpers/selector.py
+
 ## Queued two-phase scheduler
 
 The minute heartbeat captures `trigger.now` while rendering automation variables.

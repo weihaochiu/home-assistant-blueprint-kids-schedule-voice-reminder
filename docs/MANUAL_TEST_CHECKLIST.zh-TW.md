@@ -2,6 +2,14 @@
 
 請記錄 HA 版本、TTS、播放器／Calendar integration、automation trace 與結果；分享前遮蔽私人資料。
 
+## 0. Blueprint 匯入驗證
+
+- [ ] Home Assistant 2026.8.x「設定 → 自動化與場景 → 藍圖 → 匯入藍圖」Preview 成功
+- [ ] Import 成功，且可從 Blueprint 建立 automation
+- [ ] Children → Event → Schedule → Reminder → Messages 可新增、儲存並重新開啟
+- [ ] 沒有 `Invalid blueprint` 或 `extra keys not allowed`
+- [ ] 本節全部通過前，不宣稱 v0.3.3 release-ready
+
 ## Selector 與資料模型
 
 - [ ] 五個 sections 正確顯示；假日來源有 Calendar／Workday／Legacy 三項

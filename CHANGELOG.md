@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased — corrective release candidate
+
+### Fixed
+
+- Restore Home Assistant 2026.8.x Blueprint import compatibility: Core rejects the
+  unsupported `description` key under `ObjectSelector.fields.messages`.
+
+### Tests
+
+- Add strict recursive Home Assistant 2026.8.1 Object selector schema validation.
+
 ## v0.3.3 - 2026-08-21
 
 ### Fixed

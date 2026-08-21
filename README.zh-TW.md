@@ -7,6 +7,9 @@
 Events、Schedules、Reminders，依 Calendar、Workday 或舊 helper 的活動日政策播放
 多播放器 TTS，沒有固定欄位。
 
+Repository-side schema validation 已涵蓋 Home Assistant 2026.8.x nested Object
+selectors；Blueprint Preview 與 Import 仍是必須實機完成的 release gate。
+
 [![匯入 Blueprint](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fweihaochiu%2Fhome-assistant-blueprint-kids-schedule-voice-reminder%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fweihaochiu%2Fkids_schedule_voice_reminder.yaml)
 
 English: [README.md](README.md)
@@ -115,6 +118,7 @@ Jinja。同分鐘所有提醒依 due、Child、Event、Reminder 順序播放；�
 
 ```shell
 python -m pip install -r requirements-dev.txt
+python scripts/validate_ha_selector_schema.py
 python -m yamllint .
 python -m pytest -q
 git diff --check

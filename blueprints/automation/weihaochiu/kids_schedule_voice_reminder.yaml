@@ -211,10 +211,7 @@ blueprint:
                                         下課前: *minutes_choice
                                         下課後: *minutes_choice
                                 messages:
-                                  label: 播報內容
-                                  description: >-
-                                    一句固定、多句隨機、空白用 fallback。支援 {event}、
-                                    {participant}、{location}、{start_time}、{end_time}、{minutes}。
+                                  label: 播報內容（可多句隨機；支援變數）
                                   selector:
                                     object:
                                       multiple: true

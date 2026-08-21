@@ -13,6 +13,13 @@ from jinja2.nativetypes import NativeEnvironment
 import pytest
 import yaml
 
+from scripts.validate_ha_selector_schema import (
+    OBJECT_SELECTOR_CONFIG_ALLOWED_KEYS,
+    OBJECT_SELECTOR_FIELD_ALLOWED_KEYS,
+    validate_blueprint_selectors,
+    validate_selector,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BLUEPRINT_PATH = (
@@ -676,6 +683,19 @@ def test_nested_choose_has_five_conditional_timing_forms(blueprint: dict) -> Non
     messages = reminder_fields["messages"]["selector"]["object"]
     assert messages["multiple"] is True
     assert set(messages["fields"]) == {"message"}
+
+
+def test_children_and_legacy_share_valid_reminders_selector(blueprint: dict) -> None:
+    inputs = flatten_inputs(blueprint["blueprint"]["input"])
+    child_fields = inputs["children"]["selector"]["object"]["fields"]
+    child_event_fields = child_fields["events"]["selector"]["object"]["fields"]
+    legacy_event_fields = inputs["events"]["selector"]["object"]["fields"]
+    child_reminders = child_event_fields["reminders"]["selector"]
+    legacy_reminders = legacy_event_fields["reminders"]["selector"]
+    assert child_reminders is legacy_reminders
+    message_field = child_reminders["object"]["fields"]["messages"]
+    assert set(message_field) <= OBJECT_SELECTOR_FIELD_ALLOWED_KEYS
+    assert "description" not in message_field
 
 
 def test_player_tts_and_holiday_selectors(blueprint: dict) -> None:
@@ -1424,6 +1444,53 @@ def test_nested_selectors_follow_official_recursive_shape(blueprint: dict) -> No
     inputs = flatten_inputs(blueprint["blueprint"]["input"])
     for item in inputs.values():
         validate(item["selector"])
+
+
+def test_object_selector_fields_only_use_ha_supported_metadata(
+    blueprint: dict,
+) -> None:
+    """Match ObjectSelectorField and ObjectSelectorConfig in HA Core 2026.8.1."""
+    assert OBJECT_SELECTOR_FIELD_ALLOWED_KEYS == {"label", "required", "selector"}
+    assert OBJECT_SELECTOR_CONFIG_ALLOWED_KEYS == {
+        "fields",
+        "multiple",
+        "label_field",
+        "description_field",
+        "translation_key",
+        "read_only",
+    }
+    assert validate_blueprint_selectors(blueprint) == []
+
+
+def test_object_selector_validator_distinguishes_config_from_field_metadata() -> None:
+    legal = {
+        "object": {
+            "multiple": True,
+            "label_field": "name",
+            "description_field": "location",
+            "translation_key": "event",
+            "read_only": False,
+            "fields": {
+                "name": {
+                    "label": "Name",
+                    "required": True,
+                    "selector": {"text": None},
+                }
+            },
+        }
+    }
+    assert validate_selector(legal, "test") == []
+
+    legal["object"]["fields"]["name"]["description"] = "Not allowed here"
+    assert validate_selector(legal, "test") == [
+        "test.object.fields.name has unsupported metadata keys: ['description']"
+    ]
+
+
+def test_selector_validator_rejects_multiple_selector_types() -> None:
+    assert validate_selector({"text": None, "number": None}, "test") == [
+        "test must contain exactly one selector type; found keys: ['number', 'text']"
+    ]
 
 
 @pytest.mark.parametrize(("raw_candidates", "expected"), [([], False), ([{"key": "due"}], True)])

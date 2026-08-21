@@ -20,6 +20,9 @@ each Event owns weekly Schedules and independent Reminders. Disabling a Child
 disables its complete subtree. Input list order controls playback order because
 Home Assistant's Object selector has no drag-to-reorder control.
 
+Repository-side schema validation now covers Home Assistant 2026.8.x nested Object
+selectors. Actual Blueprint Preview and Import remain manual release gates.
+
 ## Holiday source modes
 
 The three modes are mutually exclusive. Workday is the upgrade-safe v0.2 default;
@@ -111,6 +114,7 @@ player-dependent.
 
 ```shell
 python -m pip install -r requirements-dev.txt
+python scripts/validate_ha_selector_schema.py
 python -m yamllint .
 python -m pytest -q
 git diff --check
