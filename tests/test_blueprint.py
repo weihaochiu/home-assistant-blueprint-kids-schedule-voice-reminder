@@ -54,6 +54,19 @@ class BlueprintLoader(yaml.SafeLoader):
     """PyYAML loader that understands Home Assistant's !input tag."""
 
 
+class FakeStates:
+    """Model the Home Assistant states object for actual Blueprint Jinja tests."""
+
+    def __init__(self, values: dict[str, str]) -> None:
+        self._values = values
+
+    def __getitem__(self, entity_id: str) -> str | None:
+        return self._values.get(entity_id)
+
+    def __call__(self, entity_id: str) -> str:
+        return self._values.get(entity_id, "unknown")
+
+
 def _input(loader: BlueprintLoader, node: yaml.Node) -> InputRef:
     return InputRef(loader.construct_scalar(node))
 
@@ -116,6 +129,57 @@ def find_variable_template(value, name: str) -> str:
             except KeyError:
                 pass
     raise KeyError(name)
+
+
+def render_tts_availability(blueprint: dict, entity_state: str | None) -> tuple[bool, bool, bool]:
+    entity_id = "tts.test_engine"
+    values = {} if entity_state is None else {entity_id: entity_state}
+    context: dict[str, object] = {
+        "states": FakeStates(values),
+        "tts_entity_input": entity_id,
+    }
+    environment = NativeEnvironment(autoescape=False)
+    for name in ("tts_entity_exists", "tts_entity_available"):
+        template = find_variable_template(blueprint["actions"], name)
+        context[name] = environment.from_string(template).render(**context)
+    condition = next(
+        action for action in blueprint["actions"]
+        if action.get("value_template") == "{{ tts_entity_available }}"
+    )
+    allowed = environment.from_string(condition["value_template"]).render(**context)
+    return context["tts_entity_exists"], context["tts_entity_available"], allowed
+
+
+def render_tts_wait_config(
+    blueprint: dict,
+    minimum: object,
+    maximum: object,
+    buffering: object,
+    message: str,
+) -> tuple[int, int, int, int]:
+    context = {
+        "minimum_tts_wait_input": minimum,
+        "maximum_tts_wait_input": maximum,
+        "buffering_timeout_input": buffering,
+    }
+    environment = NativeEnvironment(autoescape=False)
+    for name in (
+        "validated_minimum_tts_wait",
+        "validated_maximum_tts_wait",
+        "effective_minimum_tts_wait",
+        "effective_maximum_tts_wait",
+        "effective_buffering_timeout",
+    ):
+        context[name] = environment.from_string(blueprint["variables"][name]).render(**context)
+    context["announcement_message"] = message
+    speech_template = find_variable_template(blueprint["actions"], "speech_wait_seconds")
+    speech_wait = int(environment.from_string(speech_template).render(**context))
+    return (
+        context["effective_minimum_tts_wait"],
+        context["effective_maximum_tts_wait"],
+        context["effective_buffering_timeout"],
+        speech_wait,
+    )
 
 
 def parse_clock(value: object) -> time | None:
@@ -435,13 +499,13 @@ def test_yaml_loads_and_metadata_is_correct(blueprint: dict) -> None:
     assert metadata["author"] == "weihaochiu"
     assert metadata["source_url"] == SOURCE_URL
     assert metadata["homeassistant"]["min_version"] == "2026.1.0"
-    assert "v0.3.1" in metadata["name"]
-    assert "v0.3.1" in metadata["description"]
+    assert "v0.3.2" in metadata["name"]
+    assert "v0.3.2" in metadata["description"]
 
 
 def test_version_is_consistent_across_release_surfaces(blueprint: dict) -> None:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    assert version == "v0.3.1"
+    assert version == "v0.3.2"
     for filename in (
         "README.md",
         "README.zh-TW.md",
@@ -1316,6 +1380,66 @@ def test_tts_media_source_wait_and_announce_wiring(blueprint_text: str) -> None:
     assert "minimum_tts_wait_input" in blueprint_text
     assert "maximum_tts_wait_input" in blueprint_text
     assert "buffering_timeout_input" in blueprint_text
+    assert "effective_minimum_tts_wait" in blueprint_text
+    assert "effective_maximum_tts_wait" in blueprint_text
+    assert "effective_buffering_timeout" in blueprint_text
+
+
+def test_tts_unknown_state_is_allowed_for_existing_entity(blueprint: dict) -> None:
+    assert render_tts_availability(blueprint, "unknown") == (True, True, True)
+
+
+def test_tts_unavailable_state_is_rejected(blueprint: dict) -> None:
+    assert render_tts_availability(blueprint, "unavailable") == (True, False, False)
+
+
+def test_tts_normal_state_is_allowed(blueprint: dict) -> None:
+    assert render_tts_availability(blueprint, "2026-08-21T04:00:00+00:00") == (
+        True,
+        True,
+        True,
+    )
+
+
+def test_missing_tts_entity_is_rejected(blueprint: dict) -> None:
+    assert render_tts_availability(blueprint, None) == (False, False, False)
+
+
+@pytest.mark.parametrize(
+    ("minimum", "maximum", "buffering", "expected"),
+    [
+        (8, 120, 10, (8, 120, 10)),
+        (60, 10, 10, (10, 60, 10)),
+        (1, 300, 0, (1, 300, 0)),
+    ],
+)
+def test_actual_blueprint_normalizes_tts_wait_bounds(
+    blueprint: dict,
+    minimum: int,
+    maximum: int,
+    buffering: int,
+    expected: tuple[int, int, int],
+) -> None:
+    for message in ("", "字" * 2000):
+        effective_minimum, effective_maximum, effective_buffering, speech_wait = (
+            render_tts_wait_config(blueprint, minimum, maximum, buffering, message)
+        )
+        assert (effective_minimum, effective_maximum, effective_buffering) == expected
+        assert effective_minimum <= effective_maximum
+        assert effective_minimum <= speech_wait <= effective_maximum
+
+
+@pytest.mark.parametrize("value", [None, "", "abc", [], {}, True, False, -1, 9999])
+def test_actual_blueprint_malformed_tts_wait_values_fall_back_without_error(
+    blueprint: dict, value: object
+) -> None:
+    for message in ("", "字" * 2000):
+        effective_minimum, effective_maximum, effective_buffering, speech_wait = (
+            render_tts_wait_config(blueprint, value, value, value, message)
+        )
+        assert (effective_minimum, effective_maximum, effective_buffering) == (8, 120, 10)
+        assert effective_minimum <= effective_maximum
+        assert effective_minimum <= speech_wait <= effective_maximum
 
 
 @pytest.mark.parametrize("bad_events", [None, {}, "bad", [], [None], [{"name": ""}]])

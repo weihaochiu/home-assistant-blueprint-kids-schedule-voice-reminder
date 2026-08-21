@@ -1,4 +1,4 @@
-# Home Assistant 實機測試清單 — v0.3.1
+# Home Assistant 實機測試清單 — v0.3.2
 
 請記錄 HA 版本、TTS、播放器／Calendar integration、automation trace 與結果；分享前遮蔽私人資料。
 
@@ -52,4 +52,9 @@
 - [ ] 重複 Schedule 只播放一次；六 placeholders、0/1/多句、Jinja-like 純文字
 - [ ] 無候選或全部被假日濾除時沒有 snapshot、volume、TTS
 - [ ] 多播放器、unavailable 隔離、音量只設定／恢復一次
-- [ ] TTS unavailable、無 volume_level、buffering timeout、announce/resume 安全
+- [ ] Fresh HA／fresh TTS entity 顯示 `unknown` 時，第一次提醒仍能播放
+- [ ] TTS entity `unavailable` 時提醒安全跳過
+- [ ] 刪除或填入不存在的 TTS entity 時不 exception、不播放
+- [ ] minimum=60／maximum=10 時 runtime 正規化為 10／60，且不 exception
+- [ ] HomePod 第一次 TTS、volume restore、announce、media resume 實機行為
+- [ ] 無 volume_level、buffering timeout 與其他 announce/resume 失敗均安全

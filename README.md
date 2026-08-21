@@ -1,6 +1,6 @@
 # Kids Schedule Voice Reminder Blueprint
 
-![Version](https://img.shields.io/badge/version-v0.3.1-blue)
+![Version](https://img.shields.io/badge/version-v0.3.2-blue)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.1.0%2B-41BDF5)
 
 A pure Home Assistant automation Blueprint for fixed weekly family schedules,
@@ -75,6 +75,8 @@ runtime protection. Calendar is also skipped when all candidates use `run`.
 Automation mode is `queued` with `max: 20`: each admitted run retains its captured
 `trigger.now` minute and waits for earlier playback/volume restoration to complete,
 preventing overlapping heartbeats from racing speaker volume.
+An existing TTS entity's initial `unknown` state is valid and no longer treated as
+unavailable; genuinely missing or unavailable TTS entities still stop safely.
 
 Five timing modes are available: previous-day fixed, same-day fixed, before start,
 before end, and after end. Offsets are 1–1440 minutes and overnight Events are
@@ -113,4 +115,4 @@ git diff --check
 See [DESIGN.md](docs/DESIGN.md),
 [HA_RESPONSE_VARIABLE_COMPATIBILITY.md](docs/HA_RESPONSE_VARIABLE_COMPATIBILITY.md),
 the [manual checklist](docs/MANUAL_TEST_CHECKLIST.zh-TW.md), and
-[CHANGELOG.md](CHANGELOG.md). Current version: **v0.3.1**.
+[CHANGELOG.md](CHANGELOG.md). Current version: **v0.3.2**.

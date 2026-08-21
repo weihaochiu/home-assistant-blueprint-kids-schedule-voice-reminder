@@ -1,7 +1,7 @@
 blueprint:
-  name: Kids Schedule Voice Reminder（小孩行程與接送語音提醒）· v0.3.1
+  name: Kids Schedule Voice Reminder（小孩行程與接送語音提醒）· v0.3.2
   description: >-
-    版本：v0.3.1。最低 Home Assistant：2026.1.0。以動態 Children／群組、Events、
+    版本：v0.3.2。最低 Home Assistant：2026.1.0。以動態 Children／群組、Events、
     時段與提醒管理行程；可選 Calendar、Workday 或舊 helper 判斷活動發生日是否放假，
     並相容 v0.2 與 v0.1 Events。
   domain: automation
@@ -317,6 +317,22 @@ variables:
   minimum_tts_wait_input: !input minimum_tts_wait
   maximum_tts_wait_input: !input maximum_tts_wait
   buffering_timeout_input: !input buffering_timeout
+  validated_minimum_tts_wait: >-
+    {%- set value = minimum_tts_wait_input -%}
+    {{ value | int if value is number and value is not boolean
+      and value == value | int and 1 <= value <= 60 else 8 }}
+  validated_maximum_tts_wait: >-
+    {%- set value = maximum_tts_wait_input -%}
+    {{ value | int if value is number and value is not boolean
+      and value == value | int and 10 <= value <= 300 else 120 }}
+  effective_minimum_tts_wait: >-
+    {{ [validated_minimum_tts_wait | int(8), validated_maximum_tts_wait | int(120)] | min }}
+  effective_maximum_tts_wait: >-
+    {{ [validated_minimum_tts_wait | int(8), validated_maximum_tts_wait | int(120)] | max }}
+  effective_buffering_timeout: >-
+    {%- set value = buffering_timeout_input -%}
+    {{ value | int if value is number and value is not boolean
+      and value == value | int and 0 <= value <= 60 else 10 }}
   check_time: "{{ as_timestamp(trigger.now if trigger is defined and trigger.now is defined else now()) }}"
   check_minute: "{{ ((check_time | float(0)) // 60 * 60) | int }}"
   weekday_names: [monday, tuesday, wednesday, thursday, friday, saturday, sunday]
@@ -618,9 +634,13 @@ actions:
   - alias: 假日來源篩選後沒有提醒時不碰播放器或 TTS
     condition: template
     value_template: "{{ matched_reminders | count > 0 }}"
-  - alias: TTS 實體暫時不可用時安全跳過
+  - variables:
+      tts_entity_exists: "{{ states[tts_entity_input] is not none }}"
+      tts_entity_available: >-
+        {{ tts_entity_exists and states(tts_entity_input) != 'unavailable' }}
+  - alias: TTS 實體不存在或暫時不可用時安全跳過
     condition: template
-    value_template: "{{ states(tts_entity_input) not in ['unknown', 'unavailable'] }}"
+    value_template: "{{ tts_entity_available }}"
   - variables:
       player_snapshots: >-
         {% set ns = namespace(items=[]) %}
@@ -649,8 +669,8 @@ actions:
             announcement_message: "{{ repeat.item.message | trim }}"
             speech_wait_seconds: >-
               {% set estimate = ((announcement_message | length) / 3) | round(0, 'ceil') | int + 6 %}
-              {{ [[estimate, minimum_tts_wait_input | int(8)] | max,
-                maximum_tts_wait_input | int(120)] | min }}
+              {{ [[estimate, effective_minimum_tts_wait | int(8)] | max,
+                effective_maximum_tts_wait | int(120)] | min }}
         - repeat:
             for_each: "{{ player_snapshots }}"
             sequence:
@@ -669,7 +689,7 @@ actions:
     wait_template: >-
       {{ player_snapshots | map(attribute='entity_id')
         | select('is_state', 'buffering') | list | count == 0 }}
-    timeout: {seconds: "{{ buffering_timeout_input | int(10) }}"}
+    timeout: {seconds: "{{ effective_buffering_timeout | int(10) }}"}
     continue_on_timeout: true
   - alias: 全部訊息後只恢復一次各播放器原始音量
     repeat:

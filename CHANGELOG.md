@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## v0.3.2 - 2026-08-21
+
+### Fixed
+
+- Treat an existing TTS entity in its initial `unknown` state as usable instead of unavailable.
+- Reject genuinely missing or unavailable TTS entities safely.
+- Normalize inverted TTS minimum/maximum wait settings and harden malformed runtime wait values.
+
+### Tests
+
+- Add Home Assistant TTS initial-state regression coverage.
+- Add TTS wait-boundary and malformed-input regression tests.
+
 ## v0.3.1 - 2026-08-21
 
 ### Fixed

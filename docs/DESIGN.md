@@ -1,6 +1,6 @@
 # Kids Schedule Voice Reminder — Design
 
-Version: v0.3.1
+Version: v0.3.2
 
 ## Model and compatibility
 
@@ -70,6 +70,10 @@ Zero valid messages uses fallback, one is fixed, and many use `random`. Six
 placeholders are replaced literally and never re-evaluated as Jinja. Available
 player volumes snapshot/set once, all reminders play sequentially, waits are bounded,
 and numeric volumes restore once. Media announcement/resume remains best effort.
+An existing TTS entity with initial state `unknown` is usable; a missing entity is
+distinguished through `states[entity_id]`, while `unavailable` remains blocked.
+Runtime wait inputs accept only non-boolean integer values inside their selector
+ranges, fall back to defaults when malformed, and sort valid minimum/maximum values.
 
 ## Scope boundaries
 
