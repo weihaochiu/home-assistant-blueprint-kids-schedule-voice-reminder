@@ -1,0 +1,120 @@
+weekday_school:
+  - name: 平日上學
+    enabled: true
+    participant: 孩子
+    location: 學校
+    makeup_holiday_behavior: skip
+    schedules:
+      - weekdays: [monday, tuesday, wednesday, thursday, friday]
+        start_time: "08:00:00"
+        end_time: "16:00:00"
+    reminders:
+      - name: 出門上學
+        enabled: true
+        timing:
+          active_choice: 當天固定時間
+          當天固定時間:
+            time: "07:25:00"
+        messages:
+          - message: "早上提醒：準備出門上學囉。"
+
+tuesday_art:
+  - name: 畫畫課
+    enabled: true
+    participant: 姐姐
+    location: 畫室
+    makeup_holiday_behavior: run
+    schedules:
+      - weekdays: [tuesday]
+        start_time: "18:00:00"
+        end_time: "19:30:00"
+    reminders:
+      - name: 前一天準備用品
+        enabled: true
+        timing:
+          active_choice: 前一天固定時間
+          前一天固定時間:
+            time: "20:50:00"
+        messages:
+          - message: "{participant}，記得準備明天{event}要用的用品。"
+      - name: 課前 30 分
+        enabled: true
+        timing:
+          active_choice: 活動／上課前
+          活動／上課前:
+            minutes: 30
+        messages:
+          - message: "再過{minutes}分鐘，{participant}的{event}就要開始了。"
+      - name: 課前 10 分
+        enabled: true
+        timing:
+          active_choice: 活動／上課前
+          活動／上課前:
+            minutes: 10
+        messages:
+          - message: "{event}快開始了，記得出門。"
+      - name: 下課前 10 分
+        enabled: true
+        timing:
+          active_choice: 下課前
+          下課前:
+            minutes: 10
+        messages:
+          - message: "快下課了，可以準備前往{location}。"
+      - name: 下課後 10 分
+        enabled: true
+        timing:
+          active_choice: 下課後
+          下課後:
+            minutes: 10
+        messages:
+          - message: "可以去{location}接{participant}了。"
+
+multiple_schedules:
+  - name: 課後活動
+    enabled: true
+    participant: 孩子
+    location: 活動中心
+    makeup_holiday_behavior: run
+    schedules:
+      - weekdays: [monday]
+        start_time: "17:00:00"
+        end_time: "18:50:00"
+      - weekdays: [wednesday]
+        start_time: "17:30:00"
+        end_time: "18:50:00"
+      - weekdays: [friday]
+        start_time: "17:00:00"
+        end_time: "18:50:00"
+    reminders:
+      - name: 當天接送
+        enabled: true
+        timing:
+          active_choice: 當天固定時間
+          當天固定時間:
+            time: "18:50:00"
+        messages:
+          - message: "可以去接孩子了。"
+
+duplicate_schedules:
+  - name: 重複時段測試
+    enabled: true
+    participant: 孩子
+    location: 測試地點
+    makeup_holiday_behavior: run
+    schedules:
+      - weekdays: [tuesday]
+        start_time: "18:00:00"
+        end_time: "19:00:00"
+      - weekdays: [tuesday, tuesday]
+        start_time: "18:00:00"
+        end_time: "19:00:00"
+    reminders:
+      - name: 課前 30 分
+        enabled: true
+        timing:
+          active_choice: 活動／上課前
+          活動／上課前:
+            minutes: 30
+        messages:
+          - message: "重複時段只應播放一次。"

@@ -1,0 +1,682 @@
+"""Static, template, and scheduler reference tests for the Blueprint."""
+
+from __future__ import annotations
+
+from datetime import datetime, time, timedelta
+import importlib
+from pathlib import Path
+import re
+from urllib.parse import parse_qs, quote_plus, urlparse
+
+from jinja2 import Environment
+from jinja2.nativetypes import NativeEnvironment
+import pytest
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[1]
+BLUEPRINT_PATH = (
+    ROOT
+    / "blueprints"
+    / "automation"
+    / "weihaochiu"
+    / "kids_schedule_voice_reminder.yaml"
+)
+FIXTURE_PATH = ROOT / "tests" / "fixtures" / "events.yaml"
+SOURCE_URL = (
+    "https://github.com/weihaochiu/"
+    "home-assistant-blueprint-kids-schedule-voice-reminder/blob/main/"
+    "blueprints/automation/weihaochiu/kids_schedule_voice_reminder.yaml"
+)
+WEEKDAYS = [
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+]
+TIMING_CHOICES = {
+    "前一天固定時間",
+    "當天固定時間",
+    "活動／上課前",
+    "下課前",
+    "下課後",
+}
+
+
+class InputRef(str):
+    """Represent a Home Assistant !input reference during static parsing."""
+
+
+class BlueprintLoader(yaml.SafeLoader):
+    """PyYAML loader that understands Home Assistant's !input tag."""
+
+
+def _input(loader: BlueprintLoader, node: yaml.Node) -> InputRef:
+    return InputRef(loader.construct_scalar(node))
+
+
+BlueprintLoader.add_constructor("!input", _input)
+
+
+@pytest.fixture(scope="module")
+def blueprint_text() -> str:
+    return BLUEPRINT_PATH.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def blueprint(blueprint_text: str) -> dict:
+    return yaml.load(blueprint_text, Loader=BlueprintLoader)
+
+
+@pytest.fixture(scope="module")
+def fixtures() -> dict:
+    return yaml.safe_load(FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+def flatten_inputs(input_tree: dict) -> dict:
+    flattened: dict = {}
+    for key, value in input_tree.items():
+        if isinstance(value, dict) and "input" in value:
+            flattened.update(value["input"])
+        else:
+            flattened[key] = value
+    return flattened
+
+
+def walk(value):
+    yield value
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield from walk(key)
+            yield from walk(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from walk(item)
+
+
+def find_variable_template(value, name: str) -> str:
+    if isinstance(value, dict):
+        variables = value.get("variables")
+        if isinstance(variables, dict) and name in variables:
+            return variables[name]
+        if name in value and isinstance(value[name], str):
+            return value[name]
+        for item in value.values():
+            try:
+                return find_variable_template(item, name)
+            except KeyError:
+                pass
+    elif isinstance(value, list):
+        for item in value:
+            try:
+                return find_variable_template(item, name)
+            except KeyError:
+                pass
+    raise KeyError(name)
+
+
+def parse_clock(value: object) -> time | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return time.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def timing_kind(timing: dict) -> str:
+    mapping = {
+        "前一天固定時間": "previous_day_fixed",
+        "當天固定時間": "same_day_fixed",
+        "活動／上課前": "before_start",
+        "下課前": "before_end",
+        "下課後": "after_end",
+    }
+    return mapping.get(timing.get("active_choice", ""), "invalid")
+
+
+def reminder_due(
+    occurrence_date,
+    start_value: object,
+    end_value: object,
+    timing: dict,
+) -> datetime | None:
+    """Reference model for all five Blueprint reminder calculations."""
+    start_clock = parse_clock(start_value)
+    end_clock = parse_clock(end_value)
+    if start_clock is None or end_clock is None or not isinstance(timing, dict):
+        return None
+    start = datetime.combine(occurrence_date, start_clock)
+    end = datetime.combine(occurrence_date, end_clock)
+    if end <= start:
+        end += timedelta(days=1)
+    active = timing.get("active_choice", "")
+    branch = timing.get(active, {})
+    if not isinstance(branch, dict):
+        return None
+    kind = timing_kind(timing)
+    if kind in {"previous_day_fixed", "same_day_fixed"}:
+        fixed = parse_clock(branch.get("time"))
+        if fixed is None:
+            return None
+        day = occurrence_date - timedelta(days=kind == "previous_day_fixed")
+        return datetime.combine(day, fixed).replace(second=0, microsecond=0)
+    minutes = branch.get("minutes")
+    if isinstance(minutes, bool):
+        return None
+    try:
+        minutes = int(minutes)
+    except (TypeError, ValueError):
+        return None
+    if minutes <= 0:
+        return None
+    if kind == "before_start":
+        return start - timedelta(minutes=minutes)
+    if kind == "before_end":
+        return end - timedelta(minutes=minutes)
+    if kind == "after_end":
+        return end + timedelta(minutes=minutes)
+    return None
+
+
+def normalize_messages(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value:
+        raw = item.get("message", "") if isinstance(item, dict) else item
+        if isinstance(raw, str) and raw.strip():
+            result.append(raw.strip())
+    return result
+
+
+def replace_placeholders(template: str, values: dict[str, object]) -> str:
+    for key in ("event", "participant", "location", "start_time", "end_time", "minutes"):
+        template = template.replace("{" + key + "}", str(values.get(key, "")))
+    return template
+
+
+def find_matches(events: object, check: datetime, holiday_on: bool = False) -> list[dict]:
+    """Independent executable model of the minute-heartbeat scheduler."""
+    if not isinstance(events, list):
+        return []
+    check = check.replace(second=0, microsecond=0)
+    matches: list[dict] = []
+    keys: set[tuple] = set()
+    for event_index, event in enumerate(events):
+        if not isinstance(event, dict) or not event.get("enabled", True):
+            continue
+        name = str(event.get("name", "")).strip()
+        if not name or (holiday_on and event.get("makeup_holiday_behavior", "skip") == "skip"):
+            continue
+        schedules = event.get("schedules")
+        reminders = event.get("reminders")
+        if not isinstance(schedules, list) or not isinstance(reminders, list):
+            continue
+        for schedule in schedules:
+            if not isinstance(schedule, dict):
+                continue
+            weekdays = schedule.get("weekdays", [])
+            if isinstance(weekdays, str):
+                weekdays = [weekdays]
+            if not isinstance(weekdays, list):
+                continue
+            for reminder_index, reminder in enumerate(reminders):
+                if not isinstance(reminder, dict) or not reminder.get("enabled", True):
+                    continue
+                timing = reminder.get("timing", {})
+                kind = timing_kind(timing) if isinstance(timing, dict) else "invalid"
+                if kind == "previous_day_fixed":
+                    candidate_dates = [check.date() + timedelta(days=1)]
+                elif kind in {"before_start", "before_end"}:
+                    candidate_dates = [check.date(), check.date() + timedelta(days=1)]
+                elif kind == "after_end":
+                    candidate_dates = [check.date(), check.date() - timedelta(days=1)]
+                else:
+                    candidate_dates = [check.date()]
+                for occurrence_date in candidate_dates:
+                    if WEEKDAYS[occurrence_date.weekday()] not in weekdays:
+                        continue
+                    due = reminder_due(
+                        occurrence_date,
+                        schedule.get("start_time"),
+                        schedule.get("end_time"),
+                        timing,
+                    )
+                    if due != check:
+                        continue
+                    key = (event_index, occurrence_date, reminder_index, due)
+                    if key in keys:
+                        continue
+                    keys.add(key)
+                    matches.append(
+                        {
+                            "event": name,
+                            "reminder_order": reminder_index,
+                            "due": due,
+                            "messages": normalize_messages(reminder.get("messages", [])),
+                        }
+                    )
+    return sorted(matches, key=lambda item: (item["due"], item["event"], item["reminder_order"]))
+
+
+def render_blueprint_matches(
+    blueprint: dict,
+    events: list[dict],
+    check: datetime,
+    holiday_on: bool = False,
+) -> list[dict]:
+    """Render the actual matched_reminders Jinja with deterministic HA-like helpers."""
+    epoch = datetime(1970, 1, 1)
+
+    def as_datetime(value):
+        return epoch + timedelta(seconds=float(value))
+
+    def as_timestamp(value):
+        return (value - epoch).total_seconds()
+
+    def as_bool(value):
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on", "enable"}
+
+    environment = NativeEnvironment(autoescape=False)
+    environment.filters["bool"] = as_bool
+    environment.globals["timedelta"] = timedelta
+    template = environment.from_string(blueprint["variables"]["matched_reminders"])
+    check_minute = int((check - epoch).total_seconds())
+    rendered = template.render(
+        events_input=events,
+        check_minute=check_minute,
+        holiday_active=holiday_on,
+        weekday_names=WEEKDAYS,
+        as_datetime=as_datetime,
+        as_timestamp=as_timestamp,
+        as_local=lambda value: value,
+    )
+    return rendered
+
+
+def test_yaml_loads_and_metadata_is_correct(blueprint: dict) -> None:
+    metadata = blueprint["blueprint"]
+    assert metadata["domain"] == "automation"
+    assert metadata["author"] == "weihaochiu"
+    assert metadata["source_url"] == SOURCE_URL
+    assert metadata["homeassistant"]["min_version"] == "2026.1.0"
+    assert "v0.1.0" in metadata["name"]
+    assert "v0.1.0" in metadata["description"]
+
+
+def test_version_is_consistent_across_release_surfaces(blueprint: dict) -> None:
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    assert version == "v0.1.0"
+    for filename in ("README.md", "README.zh-TW.md", "CHANGELOG.md"):
+        assert version in (ROOT / filename).read_text(encoding="utf-8")
+    assert version in blueprint["blueprint"]["name"]
+    assert version in next(iter(blueprint["blueprint"]["input"].values()))["description"]
+
+
+def test_input_sections_and_references(blueprint: dict) -> None:
+    tree = blueprint["blueprint"]["input"]
+    assert list(tree) == [
+        "holiday_section",
+        "playback_section",
+        "events_section",
+        "advanced_section",
+    ]
+    inputs = flatten_inputs(tree)
+    references = {str(value) for value in walk(blueprint) if isinstance(value, InputRef)}
+    assert references == set(inputs)
+
+
+def test_dynamic_event_schedule_and_reminder_schema(blueprint: dict) -> None:
+    inputs = flatten_inputs(blueprint["blueprint"]["input"])
+    events = inputs["events"]["selector"]["object"]
+    assert events["multiple"] is True
+    assert inputs["events"]["default"] == []
+    fields = events["fields"]
+    assert {"name", "enabled", "participant", "location", "makeup_holiday_behavior", "schedules", "reminders"} <= set(fields)
+    schedules = fields["schedules"]["selector"]["object"]
+    reminders = fields["reminders"]["selector"]["object"]
+    assert schedules["multiple"] is True
+    assert reminders["multiple"] is True
+    weekday_select = schedules["fields"]["weekdays"]["selector"]["select"]
+    assert weekday_select["multiple"] is True
+    assert [item["value"] for item in weekday_select["options"]] == WEEKDAYS
+
+
+def test_nested_choose_has_five_conditional_timing_forms(blueprint: dict) -> None:
+    inputs = flatten_inputs(blueprint["blueprint"]["input"])
+    reminder_fields = inputs["events"]["selector"]["object"]["fields"]["reminders"]["selector"]["object"]["fields"]
+    choices = reminder_fields["timing"]["selector"]["choose"]["choices"]
+    assert set(choices) == TIMING_CHOICES
+    for label in ("前一天固定時間", "當天固定時間"):
+        assert set(choices[label]["selector"]["object"]["fields"]) == {"time"}
+    for label in ("活動／上課前", "下課前", "下課後"):
+        assert set(choices[label]["selector"]["object"]["fields"]) == {"minutes"}
+    messages = reminder_fields["messages"]["selector"]["object"]
+    assert messages["multiple"] is True
+    assert set(messages["fields"]) == {"message"}
+
+
+def test_player_tts_and_holiday_selectors(blueprint: dict) -> None:
+    inputs = flatten_inputs(blueprint["blueprint"]["input"])
+    assert inputs["media_players"]["selector"]["entity"] == {
+        "multiple": True,
+        "filter": [{"domain": "media_player"}],
+    }
+    assert inputs["tts_entity"]["selector"]["entity"]["filter"] == [{"domain": "tts"}]
+    assert inputs["makeup_holiday_entity"]["selector"]["entity"]["filter"] == [{"domain": "input_boolean"}]
+
+
+def test_modern_heartbeat_and_fixed_trigger_minute(blueprint: dict, blueprint_text: str) -> None:
+    assert blueprint["triggers"] == [{"trigger": "time_pattern", "minutes": "/1", "id": "heartbeat"}]
+    assert blueprint["mode"] == "parallel"
+    assert blueprint["max"] == 10
+    assert "trigger.now" in blueprint["variables"]["check_time"]
+    assert "check_minute" in blueprint["variables"]
+    assert "platform:" not in blueprint_text
+    assert "service:" not in blueprint_text
+
+
+def test_all_templates_are_jinja_syntax_valid(blueprint: dict) -> None:
+    environment = Environment(autoescape=False)
+    environment.filters["urlencode"] = quote_plus
+    environment.filters["bool"] = bool
+    for value in walk(blueprint):
+        if isinstance(value, str) and any(token in value for token in ("{{", "{%", "{#")):
+            environment.parse(value)
+
+
+@pytest.mark.parametrize(
+    ("active", "branch", "expected"),
+    [
+        ("前一天固定時間", {"time": "20:50:00"}, datetime(2026, 8, 17, 20, 50)),
+        ("當天固定時間", {"time": "17:00:00"}, datetime(2026, 8, 18, 17, 0)),
+        ("活動／上課前", {"minutes": 30}, datetime(2026, 8, 18, 17, 30)),
+        ("下課前", {"minutes": 10}, datetime(2026, 8, 18, 19, 20)),
+        ("下課後", {"minutes": 10}, datetime(2026, 8, 18, 19, 40)),
+    ],
+)
+def test_five_reminder_datetime_calculations(active, branch, expected) -> None:
+    timing = {"active_choice": active, active: branch}
+    assert reminder_due(expected.date() if active != "前一天固定時間" else datetime(2026, 8, 18).date(), "18:00:00", "19:30:00", timing) == expected
+
+
+def test_fixture_weekday_patterns_and_multiple_schedules(fixtures: dict) -> None:
+    school = fixtures["weekday_school"][0]["schedules"]
+    art = fixtures["tuesday_art"][0]["schedules"]
+    multiple = fixtures["multiple_schedules"][0]["schedules"]
+    assert school[0]["weekdays"] == WEEKDAYS[:5]
+    assert art[0]["weekdays"] == ["tuesday"]
+    assert [item["weekdays"][0] for item in multiple] == ["monday", "wednesday", "friday"]
+    assert len(multiple) == 3
+
+
+def test_same_event_has_multiple_independent_reminders(fixtures: dict) -> None:
+    event = fixtures["tuesday_art"][0]
+    checks = [
+        datetime(2026, 8, 18, 17, 30),
+        datetime(2026, 8, 18, 17, 50),
+        datetime(2026, 8, 18, 19, 40),
+    ]
+    assert [len(find_matches([event], check)) for check in checks] == [1, 1, 1]
+    messages = [find_matches([event], check)[0]["messages"][0] for check in checks]
+    assert len(set(messages)) == 3
+
+
+@pytest.mark.parametrize(
+    ("holiday_on", "policy", "expected"),
+    [(False, "skip", 1), (True, "skip", 0), (True, "run", 1)],
+)
+def test_makeup_holiday_policy(fixtures: dict, holiday_on: bool, policy: str, expected: int) -> None:
+    event = fixtures["tuesday_art"][0] | {"makeup_holiday_behavior": policy}
+    assert len(find_matches([event], datetime(2026, 8, 18, 17, 30), holiday_on)) == expected
+
+
+def test_previous_day_reminder_is_blocked_when_switch_is_already_on(fixtures: dict) -> None:
+    event = fixtures["tuesday_art"][0] | {"makeup_holiday_behavior": "skip"}
+    check = datetime(2026, 8, 17, 20, 50)
+    assert len(find_matches([event], check, holiday_on=False)) == 1
+    assert find_matches([event], check, holiday_on=True) == []
+
+
+def test_disabled_event_and_disabled_reminder(fixtures: dict) -> None:
+    event = fixtures["tuesday_art"][0]
+    check = datetime(2026, 8, 18, 17, 30)
+    assert find_matches([event | {"enabled": False}], check) == []
+    disabled_reminders = [item | {"enabled": False} for item in event["reminders"]]
+    assert find_matches([event | {"reminders": disabled_reminders}], check) == []
+
+
+def test_duplicate_schedule_deduplicates_one_candidate(fixtures: dict) -> None:
+    matches = find_matches(fixtures["duplicate_schedules"], datetime(2026, 8, 18, 17, 30))
+    assert len(matches) == 1
+
+
+@pytest.mark.parametrize(
+    ("event_day", "expected_due"),
+    [
+        (datetime(2026, 8, 17).date(), datetime(2026, 8, 16, 20, 50)),
+        (datetime(2026, 8, 23).date(), datetime(2026, 8, 22, 20, 50)),
+    ],
+)
+def test_previous_day_weekday_rollover(event_day, expected_due) -> None:
+    timing = {"active_choice": "前一天固定時間", "前一天固定時間": {"time": "20:50:00"}}
+    assert reminder_due(event_day, "18:00:00", "19:00:00", timing) == expected_due
+
+
+def test_relative_offsets_can_cross_midnight() -> None:
+    before = {"active_choice": "活動／上課前", "活動／上課前": {"minutes": 30}}
+    after = {"active_choice": "下課後", "下課後": {"minutes": 20}}
+    day = datetime(2026, 8, 18).date()
+    assert reminder_due(day, "00:10:00", "01:00:00", before) == datetime(2026, 8, 17, 23, 40)
+    assert reminder_due(day, "23:00:00", "23:50:00", after) == datetime(2026, 8, 19, 0, 10)
+
+
+def test_blueprint_scans_adjacent_occurrence_days_for_relative_offsets(blueprint: dict) -> None:
+    template = blueprint["variables"]["matched_reminders"]
+    assert "day_offsets = [0, 1]" in template
+    assert "day_offsets = [0, -1]" in template
+
+
+def test_actual_blueprint_template_previous_day_holiday_and_dedup(
+    blueprint: dict, fixtures: dict
+) -> None:
+    art = fixtures["tuesday_art"]
+    previous_day = render_blueprint_matches(
+        blueprint, art, datetime(2026, 8, 17, 20, 50)
+    )
+    assert len(previous_day) == 1
+    assert previous_day[0]["message"] == "姐姐，記得準備明天畫畫課要用的用品。"
+
+    blocked_event = art[0] | {"makeup_holiday_behavior": "skip"}
+    assert render_blueprint_matches(
+        blueprint, [blocked_event], datetime(2026, 8, 17, 20, 50), holiday_on=True
+    ) == []
+
+    duplicate = render_blueprint_matches(
+        blueprint, fixtures["duplicate_schedules"], datetime(2026, 8, 18, 17, 30)
+    )
+    assert len(duplicate) == 1
+
+
+def test_actual_blueprint_template_relative_midnight_and_multiple_matches(
+    blueprint: dict,
+) -> None:
+    event = {
+        "name": "夜間活動",
+        "enabled": True,
+        "participant": "孩子",
+        "location": "活動中心",
+        "makeup_holiday_behavior": "run",
+        "schedules": [
+            {
+                "weekdays": ["tuesday"],
+                "start_time": "00:10:00",
+                "end_time": "23:50:00",
+            }
+        ],
+        "reminders": [
+            {
+                "name": "跨日前提醒",
+                "enabled": True,
+                "timing": {
+                    "active_choice": "活動／上課前",
+                    "活動／上課前": {"minutes": 30},
+                },
+                "messages": [{"message": "{event}還有{minutes}分鐘。"}],
+            },
+            {
+                "name": "跨日後提醒",
+                "enabled": True,
+                "timing": {
+                    "active_choice": "下課後",
+                    "下課後": {"minutes": 20},
+                },
+                "messages": [],
+            },
+        ],
+    }
+    before = render_blueprint_matches(blueprint, [event], datetime(2026, 8, 17, 23, 40))
+    after = render_blueprint_matches(blueprint, [event], datetime(2026, 8, 19, 0, 10))
+    assert [item["message"] for item in before] == ["夜間活動還有30分鐘。"]
+    assert [item["message"] for item in after] == ["孩子的夜間活動提醒時間到了。"]
+
+    second = event | {"name": "另一活動"}
+    simultaneous = render_blueprint_matches(
+        blueprint, [event, second], datetime(2026, 8, 17, 23, 40)
+    )
+    assert [item["event"] for item in simultaneous] == ["另一活動", "夜間活動"]
+
+
+def test_message_rules_and_safe_placeholder_replacement() -> None:
+    assert normalize_messages([]) == []
+    assert normalize_messages([{"message": "固定"}]) == ["固定"]
+    assert normalize_messages([{"message": "A"}, {"message": "B"}]) == ["A", "B"]
+    template = "再過{minutes}分鐘，{participant}的{event}在{location}開始。{{ unsafe }}"
+    rendered = replace_placeholders(template, {"minutes": 30, "participant": "孩子", "event": "畫畫課", "location": "畫室"})
+    assert rendered == "再過30分鐘，孩子的畫畫課在畫室開始。{{ unsafe }}"
+
+
+def test_template_has_runtime_dedup_random_fallback_and_explicit_replacements(blueprint: dict) -> None:
+    template = blueprint["variables"]["matched_reminders"]
+    assert "key not in ns.keys" in template
+    assert "msg_ns.values | random" in template
+    assert "提醒時間到了。" in template
+    for placeholder in ("event", "participant", "location", "start_time", "end_time", "minutes"):
+        assert f"replace('{{{placeholder}}}'" in template
+    assert "from_json" not in template
+
+
+def test_playback_snapshots_once_plays_all_then_restores_once(blueprint: dict, blueprint_text: str) -> None:
+    assert "matched_reminders | count > 0" in blueprint["conditions"][0]["value_template"]
+    assert "for player in media_players_input" in blueprint_text
+    assert "states(player) not in ['unknown', 'unavailable']" in blueprint_text
+    assert "repeat.item.volume is number" in blueprint_text
+    assert "player_snapshots if restore_original_volume_input else []" in blueprint_text
+    assert "continue_on_error: true" in blueprint_text
+    assert blueprint_text.count("action: media_player.volume_set") == 2
+    play_position = blueprint_text.index("依序播放本分鐘全部提醒")
+    restore_position = blueprint_text.index("全部訊息後只恢復一次")
+    assert play_position < restore_position
+
+
+def test_tts_media_source_wait_and_announce_wiring(blueprint_text: str) -> None:
+    assert "'media-source://tts/' ~ tts_entity_input" in blueprint_text
+    assert "announcement_message | urlencode" in blueprint_text
+    assert "tts_language_input | urlencode" in blueprint_text
+    assert "media_content_type: music" in blueprint_text
+    assert 'announce: "{{ attempt_media_resume_input }}"' in blueprint_text
+    assert "minimum_tts_wait_input" in blueprint_text
+    assert "maximum_tts_wait_input" in blueprint_text
+    assert "buffering_timeout_input" in blueprint_text
+
+
+@pytest.mark.parametrize("bad_events", [None, {}, "bad", [], [None], [{"name": ""}]])
+def test_invalid_or_empty_event_data_fails_safe(bad_events) -> None:
+    assert find_matches(bad_events, datetime(2026, 8, 18, 12, 0)) == []
+
+
+def test_scope_and_privacy_scan(blueprint_text: str) -> None:
+    for forbidden in ("AmazingTalker", "calendar.get_events", "Google Calendar", "寒假", "暑假", "補課"):
+        assert forbidden not in blueprint_text
+    assert not re.search(r"(?:token|password)\s*:", blueprint_text, re.IGNORECASE)
+    assert not re.search(r"input_boolean\.[a-z0-9_]", blueprint_text)
+    assert not re.search(
+        r"media_player\.(?!volume_set\b|play_media\b)[a-z0-9_]", blueprint_text
+    )
+
+
+def test_my_home_assistant_import_links_are_correctly_encoded() -> None:
+    for filename in ("README.md", "README.zh-TW.md"):
+        text = (ROOT / filename).read_text(encoding="utf-8")
+        match = re.search(r"https://my\.home-assistant\.io/redirect/blueprint_import/\?blueprint_url=[^)]+", text)
+        assert match, filename
+        parsed = urlparse(match.group(0))
+        assert parse_qs(parsed.query)["blueprint_url"] == [SOURCE_URL]
+
+
+def test_repository_text_is_utf8_without_bom() -> None:
+    for path in ROOT.rglob("*"):
+        if not path.is_file() or any(part in {".git", ".venv", "BACKUP", ".pytest_cache", "__pycache__"} for part in path.parts):
+            continue
+        if path.suffix.lower() not in {".md", ".yaml", ".yml", ".py", ".txt", ""}:
+            continue
+        raw = path.read_bytes()
+        assert not raw.startswith(b"\xef\xbb\xbf"), path
+        raw.decode("utf-8")
+
+
+def test_github_actions_runs_all_required_validation() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "validate.yaml").read_text(encoding="utf-8")
+    assert "python -m pip install -r requirements-dev.txt" in workflow
+    assert "python -m yamllint ." in workflow
+    assert "python -m pytest -q" in workflow
+    assert "git diff --check" in workflow
+
+
+def test_backup_zip_manifest_exclusions_verification_and_retention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backup_module = importlib.import_module("scripts.create_backup")
+    monkeypatch.setattr(backup_module, "ROOT", tmp_path)
+    monkeypatch.setattr(backup_module, "BACKUP_DIR", tmp_path / "BACKUP")
+    monkeypatch.setattr(
+        backup_module,
+        "git",
+        lambda *args: {
+            ("branch", "--show-current"): "main",
+            ("rev-parse", "HEAD"): "0123456789abcdef0123456789abcdef01234567",
+            ("status", "--short"): "clean",
+        }[args],
+    )
+    (tmp_path / "source.txt").write_text("source", encoding="utf-8")
+    for excluded in (".git", "BACKUP", ".venv", "venv", "__pycache__", ".pytest_cache"):
+        directory = tmp_path / excluded
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "secret.txt").write_text("excluded", encoding="utf-8")
+    (tmp_path / "ignored.pyc").write_bytes(b"excluded")
+
+    created = [backup_module.create_backup() for _ in range(12)]
+    backups = sorted((tmp_path / "BACKUP").glob("*.zip"))
+    assert len({path.name for path in created}) == 12
+    assert len(backups) == backup_module.KEEP_LATEST == 10
+
+    import zipfile
+
+    with zipfile.ZipFile(backups[-1]) as archive:
+        assert archive.testzip() is None
+        names = archive.namelist()
+        assert "source.txt" in names
+        assert "BACKUP_MANIFEST.txt" in names
+        assert all("secret.txt" not in name for name in names)
+        assert all(not name.endswith(".pyc") for name in names)
+        manifest = archive.read("BACKUP_MANIFEST.txt").decode("utf-8")
+        assert "repository:" in manifest
+        assert "branch: main" in manifest
+        assert "HEAD SHA: 0123456789abcdef" in manifest
+        assert "git status:" in manifest
