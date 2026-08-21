@@ -1,4 +1,4 @@
-# Home Assistant 實機測試清單 — v0.3.0
+# Home Assistant 實機測試清單 — v0.3.1
 
 請記錄 HA 版本、TTS、播放器／Calendar integration、automation trace 與結果；分享前遮蔽私人資料。
 
@@ -39,7 +39,7 @@
 
 - [ ] HA 2026.8.x：一個候選經 response action 後，下一個 Variables step 可讀 response
 - [ ] 以錯誤 response 重測，Variables step 仍安全 fail-open，不出現 undefined trace error
-- [ ] 讓 TTS 超過一分鐘：下一個 heartbeat 排隊，不與前一批同時改音量
+- [ ] 讓 TTS 超過一分鐘：無候選 heartbeat 不進 queue；有候選 heartbeat 依序排隊
 - [ ] 每個 queued run 使用自己的 `trigger.now` 分鐘，沒有漏播或重算成 dequeue 時間
 - [ ] 超過 20 個積壓 run 時依 `max_exceeded: warning` 記錄警告
 
@@ -47,6 +47,7 @@
 
 - [ ] 五種 timing、多 Schedule、跨午夜 before／after reminder
 - [ ] Monday 23:00–Tuesday 01:00 +1439/+1440 在 Wednesday 播放
+- [ ] relative minutes 的 1／1440 可播放；0／負數／1441／非數字／boolean 不產生候選
 - [ ] 同分鐘不同 Children／Events／Reminders 全部依輸入順序播放
 - [ ] 重複 Schedule 只播放一次；六 placeholders、0/1/多句、Jinja-like 純文字
 - [ ] 無候選或全部被假日濾除時沒有 snapshot、volume、TTS

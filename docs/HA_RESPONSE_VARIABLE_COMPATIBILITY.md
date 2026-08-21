@@ -1,6 +1,6 @@
 # Home Assistant response-variable compatibility
 
-Version: v0.3.0
+Version: v0.3.1
 Reviewed target: Home Assistant Core 2026.8.1
 
 ## Finding

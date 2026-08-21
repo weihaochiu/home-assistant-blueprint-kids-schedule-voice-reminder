@@ -1,6 +1,6 @@
 # Kids Schedule Voice Reminder — Design
 
-Version: v0.3.0
+Version: v0.3.1
 
 ## Model and compatibility
 
@@ -18,15 +18,18 @@ standards-compatible providers remain selectable.
 
 ## Queued two-phase scheduler
 
-The minute heartbeat captures `trigger.now`; automation mode is `queued`, `max: 20`.
-The no-candidate condition is the first action, not a top-level automation condition.
-This lets each admitted run retain its trigger context while serializing player
-snapshot, playback, and volume restoration.
+The minute heartbeat captures `trigger.now` while rendering automation variables.
+A top-level no-candidate condition rejects empty heartbeats before queued admission;
+the same condition remains the first action as defensive runtime protection.
+Automation mode is `queued`, `max: 20`, serializing player snapshot, playback, and
+volume restoration while each admitted run retains its trigger-time minute.
 
 Phase A scans each Event at occurrence offsets `[-2, -1, 0, 1]` for all five timing
 modes. D-2 covers an overnight Event plus a 1440-minute after-end reminder. A key
 containing runtime Child/Event identity, occurrence date, Reminder index, and due
 minute collapses duplicate Schedules. Candidates sort by due, Child, Event, Reminder.
+Relative minute values must be non-boolean integer numbers from 1 through 1440 at
+runtime; malformed and out-of-range values produce no candidate.
 
 If Phase A is empty, execution stops before holiday and media actions. `run`
 candidates never need holiday data. Phase B filters only `skip` candidates against

@@ -171,7 +171,7 @@ def reminder_due(
         minutes = int(minutes)
     except (TypeError, ValueError):
         return None
-    if minutes <= 0:
+    if not 1 <= minutes <= 1440:
         return None
     if kind == "before_start":
         return start - timedelta(minutes=minutes)
@@ -435,14 +435,22 @@ def test_yaml_loads_and_metadata_is_correct(blueprint: dict) -> None:
     assert metadata["author"] == "weihaochiu"
     assert metadata["source_url"] == SOURCE_URL
     assert metadata["homeassistant"]["min_version"] == "2026.1.0"
-    assert "v0.3.0" in metadata["name"]
-    assert "v0.3.0" in metadata["description"]
+    assert "v0.3.1" in metadata["name"]
+    assert "v0.3.1" in metadata["description"]
 
 
 def test_version_is_consistent_across_release_surfaces(blueprint: dict) -> None:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    assert version == "v0.3.0"
-    for filename in ("README.md", "README.zh-TW.md", "CHANGELOG.md"):
+    assert version == "v0.3.1"
+    for filename in (
+        "README.md",
+        "README.zh-TW.md",
+        "CHANGELOG.md",
+        "docs/DESIGN.md",
+        "docs/HA_RESPONSE_VARIABLE_COMPATIBILITY.md",
+        "docs/HOLIDAY_CALENDAR_RESEARCH.md",
+        "docs/MANUAL_TEST_CHECKLIST.zh-TW.md",
+    ):
         assert version in (ROOT / filename).read_text(encoding="utf-8")
     assert version in blueprint["blueprint"]["name"]
     assert version in blueprint["blueprint"]["description"]
@@ -529,6 +537,55 @@ def test_modern_heartbeat_and_fixed_trigger_minute(blueprint: dict, blueprint_te
     assert "check_minute" in blueprint["variables"]
     assert "platform:" not in blueprint_text
     assert "service:" not in blueprint_text
+
+
+def test_trigger_now_snapshot_drives_candidates_when_execution_is_delayed(
+    blueprint: dict,
+) -> None:
+    trigger_now = datetime(2026, 8, 18, 17, 30)
+    delayed_execution = datetime(2026, 8, 18, 17, 32)
+    epoch = datetime(1970, 1, 1)
+    fallback_calls: list[datetime] = []
+
+    def fallback_now() -> datetime:
+        fallback_calls.append(delayed_execution)
+        return delayed_execution
+
+    def as_timestamp(value: datetime) -> float:
+        return (value - epoch).total_seconds()
+
+    environment = NativeEnvironment(autoescape=False)
+    environment.filters["bool"] = lambda value: bool(value)
+    environment.globals.update(
+        as_datetime=lambda value: epoch + timedelta(seconds=float(value)),
+        as_local=lambda value: value,
+        as_timestamp=as_timestamp,
+        now=fallback_now,
+        timedelta=timedelta,
+    )
+    context = {"trigger": {"now": trigger_now}}
+    for name in ("check_time", "check_minute"):
+        context[name] = environment.from_string(blueprint["variables"][name]).render(**context)
+
+    event = simple_event(
+        timing={
+            "active_choice": "當天固定時間",
+            "當天固定時間": {"time": "17:30:00"},
+        },
+        policy="run",
+    )
+    context.update(
+        children_input=[child("群組", [event])],
+        events_input=[],
+        weekday_names=WEEKDAYS,
+    )
+    for name in ("valid_children", "runtime_events", "raw_candidates"):
+        context[name] = environment.from_string(blueprint["variables"][name]).render(**context)
+
+    assert context["check_time"] == as_timestamp(trigger_now)
+    assert context["check_minute"] == int(as_timestamp(trigger_now))
+    assert fallback_calls == []
+    assert len(context["raw_candidates"]) == 1
 
 
 def test_all_templates_are_jinja_syntax_valid(blueprint: dict) -> None:
@@ -874,6 +931,64 @@ def test_overnight_after_end_maximum_offsets_are_found(blueprint: dict, minutes:
     assert matches[0]["occurrence_offset"] == -2
 
 
+def relative_due(kind: str, minutes: int) -> datetime:
+    start = datetime(2026, 8, 18, 18, 0)
+    end = datetime(2026, 8, 18, 19, 0)
+    if kind == "活動／上課前":
+        return start - timedelta(minutes=minutes)
+    if kind == "下課前":
+        return end - timedelta(minutes=minutes)
+    return end + timedelta(minutes=minutes)
+
+
+@pytest.mark.parametrize("kind", ["活動／上課前", "下課前", "下課後"])
+@pytest.mark.parametrize("minutes", [1, 10, 30, 60, 1439, 1440])
+def test_actual_blueprint_accepts_relative_minute_boundaries(
+    blueprint: dict, kind: str, minutes: int
+) -> None:
+    timing = {"active_choice": kind, kind: {"minutes": minutes}}
+    event = simple_event(timing=timing, policy="run")
+    matches = render_blueprint_matches(
+        blueprint, [], relative_due(kind, minutes), children=[child("群組", [event])]
+    )
+    assert len(matches) == 1
+
+
+@pytest.mark.parametrize("kind", ["活動／上課前", "下課前", "下課後"])
+@pytest.mark.parametrize("minutes", [0, -1, 1441, 2000, 9999])
+def test_actual_blueprint_rejects_out_of_range_relative_minutes(
+    blueprint: dict, kind: str, minutes: int
+) -> None:
+    timing = {"active_choice": kind, kind: {"minutes": minutes}}
+    event = simple_event(timing=timing, policy="run")
+    assert render_blueprint_matches(
+        blueprint, [], relative_due(kind, minutes), children=[child("群組", [event])]
+    ) == []
+
+
+@pytest.mark.parametrize("kind", ["活動／上課前", "下課前", "下課後"])
+@pytest.mark.parametrize("minutes", [None, "", "abc", [], {}, True, False])
+def test_actual_blueprint_rejects_malformed_relative_minutes_without_error(
+    blueprint: dict, kind: str, minutes: object
+) -> None:
+    timing = {"active_choice": kind, kind: {"minutes": minutes}}
+    event = simple_event(timing=timing, policy="run")
+    coerced = 1 if minutes is True else 0
+    assert render_blueprint_matches(
+        blueprint, [], relative_due(kind, coerced), children=[child("群組", [event])]
+    ) == []
+
+
+def test_runtime_relative_minutes_validation_is_numeric_integer_and_bounded(
+    blueprint: dict,
+) -> None:
+    template = blueprint["variables"]["raw_candidates"]
+    assert "raw_minutes is number" in template
+    assert "raw_minutes is not boolean" in template
+    assert "raw_minutes == raw_minutes | int" in template
+    assert "1 <= raw_minutes <= 1440" in template
+
+
 def test_workday_actions_are_fixed_deduplicated_and_fail_open(blueprint: dict) -> None:
     actions = [item for item in blueprint["actions"] if isinstance(item, dict)]
     checks = [
@@ -1139,8 +1254,27 @@ def test_nested_selectors_follow_official_recursive_shape(blueprint: dict) -> No
         validate(item["selector"])
 
 
-def test_no_candidate_gate_is_first_queued_action(blueprint: dict) -> None:
-    assert "conditions" not in blueprint
+@pytest.mark.parametrize(("raw_candidates", "expected"), [([], False), ([{"key": "due"}], True)])
+def test_top_level_queue_admission_condition_renders_candidate_presence(
+    blueprint: dict, raw_candidates: list[dict], expected: bool
+) -> None:
+    condition = blueprint["conditions"][0]
+    rendered = NativeEnvironment(autoescape=False).from_string(
+        condition["value_template"]
+    ).render(raw_candidates=raw_candidates)
+    assert rendered is expected
+
+
+def test_candidate_guards_cover_queue_admission_and_defensive_action(blueprint: dict) -> None:
+    assert blueprint["mode"] == "queued"
+    assert blueprint["max"] == 20
+    assert blueprint["max_exceeded"] == "warning"
+    assert blueprint["conditions"] == [
+        {
+            "condition": "template",
+            "value_template": "{{ raw_candidates | count > 0 }}",
+        }
+    ]
     assert blueprint["actions"][0] == {
         "alias": "Phase A 沒有候選時不查假日來源、不改音量、不播放",
         "condition": "template",

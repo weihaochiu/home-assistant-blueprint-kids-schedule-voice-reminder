@@ -1,6 +1,6 @@
 # 小孩行程與接送語音提醒 Blueprint
 
-![Version](https://img.shields.io/badge/version-v0.3.0-blue)
+![Version](https://img.shields.io/badge/version-v0.3.1-blue)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.1.0%2B-41BDF5)
 
 純 Home Assistant Automation Blueprint：用固定每週時段管理動態 Children／群組、
@@ -80,6 +80,7 @@ Workday 建立路徑為「設定 → 裝置與服務 → 新增整合 → Workda
 候選；沒有候選，或候選全部為 `run` 時，不查 Calendar。Workday 也只查 `skip` 候選的相異
 活動發生日。
 
+沒有候選的 heartbeat 會在進入 queue 前被拒絕，actions 內仍保留第二層防禦 guard。
 automation 使用 `queued`、`max: 20`。每次觸發保留自身 `trigger.now` 所在分鐘，上一批 TTS
 完成並恢復音量後下一批才開始，避免重疊 heartbeat 互相覆寫播放器音量。若假日篩選後為空，
 不做 snapshot、音量或 TTS。
@@ -116,4 +117,4 @@ git diff --check
 ```
 
 另見 [設計](docs/DESIGN.md)、[HA response variable 相容性](docs/HA_RESPONSE_VARIABLE_COMPATIBILITY.md)、
-[人工驗收](docs/MANUAL_TEST_CHECKLIST.zh-TW.md) 與 [變更紀錄](CHANGELOG.md)。目前版本：**v0.3.0**。
+[人工驗收](docs/MANUAL_TEST_CHECKLIST.zh-TW.md) 與 [變更紀錄](CHANGELOG.md)。目前版本：**v0.3.1**。

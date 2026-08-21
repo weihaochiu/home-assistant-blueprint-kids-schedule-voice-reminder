@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## v0.3.1 - 2026-08-21
+
+### Fixed
+
+- Prevent empty one-minute heartbeat runs from occupying queued automation slots by gating candidate-free runs before queue admission.
+- Enforce the documented 1–1440 minute runtime limit for relative reminder offsets, including malformed-value fail-safe handling.
+
+### Tests
+
+- Add queue-admission and trigger-timestamp regression coverage.
+- Add relative reminder boundary and malformed-input regression tests.
+
 ## v0.3.0 - 2026-08-21
 
 ### Added

@@ -1,7 +1,7 @@
 blueprint:
-  name: Kids Schedule Voice Reminder（小孩行程與接送語音提醒）· v0.3.0
+  name: Kids Schedule Voice Reminder（小孩行程與接送語音提醒）· v0.3.1
   description: >-
-    版本：v0.3.0。最低 Home Assistant：2026.1.0。以動態 Children／群組、Events、
+    版本：v0.3.1。最低 Home Assistant：2026.1.0。以動態 Children／群組、Events、
     時段與提醒管理行程；可選 Calendar、Workday 或舊 helper 判斷活動發生日是否放假，
     並相容 v0.2 與 v0.1 Events。
   domain: automation
@@ -397,7 +397,10 @@ variables:
                     {%- if end <= start -%}{%- set end = end + timedelta(days=1) -%}{%- endif -%}
                     {%- set branch = timing.get(kind, {}) -%}
                     {%- set branch = branch if branch is mapping else {} -%}
-                    {%- set minutes = branch.get('minutes', 0) | int(0) -%}
+                    {%- set raw_minutes = branch.get('minutes') -%}
+                    {%- set valid_minutes = raw_minutes is number and raw_minutes is not boolean
+                      and raw_minutes == raw_minutes | int and 1 <= raw_minutes <= 1440 -%}
+                    {%- set minutes = raw_minutes | int if valid_minutes else 0 -%}
                     {%- set due = none -%}
                     {%- if kind in ['前一天固定時間', '當天固定時間'] -%}
                       {%- set fp = (branch.get('time', '') | string).split(':') -%}
@@ -407,11 +410,11 @@ variables:
                         {%- set fixed_day = day - timedelta(days=1) if kind == '前一天固定時間' else day -%}
                         {%- set due = fixed_day + timedelta(hours=fh, minutes=fm) -%}
                       {%- endif -%}
-                    {%- elif kind == '活動／上課前' and minutes > 0 -%}
+                    {%- elif kind == '活動／上課前' and valid_minutes -%}
                       {%- set due = start - timedelta(minutes=minutes) -%}
-                    {%- elif kind == '下課前' and minutes > 0 -%}
+                    {%- elif kind == '下課前' and valid_minutes -%}
                       {%- set due = end - timedelta(minutes=minutes) -%}
-                    {%- elif kind == '下課後' and minutes > 0 -%}
+                    {%- elif kind == '下課後' and valid_minutes -%}
                       {%- set due = end + timedelta(minutes=minutes) -%}
                     {%- endif -%}
                     {%- if due is not none -%}
@@ -497,6 +500,10 @@ variables:
   workday_date_minus_1: "{{ (as_local(as_datetime(check_minute | int)).date() - timedelta(days=1)) | string }}"
   workday_date_same: "{{ as_local(as_datetime(check_minute | int)).date() | string }}"
   workday_date_plus_1: "{{ (as_local(as_datetime(check_minute | int)).date() + timedelta(days=1)) | string }}"
+
+conditions:
+  - condition: template
+    value_template: "{{ raw_candidates | count > 0 }}"
 
 actions:
   - alias: Phase A 沒有候選時不查假日來源、不改音量、不播放
