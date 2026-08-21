@@ -8,12 +8,17 @@ All notable changes to this project are documented here.
 
 - Restore Home Assistant 2026.8.x Blueprint import compatibility: Core rejects the
   unsupported `description` key under `ObjectSelector.fields.messages`.
+- Restore Home Assistant 2026.8.2 editor usability by rendering Reminder Timing
+  Time/Number controls directly instead of opening a one-field Object dialog.
+- Accept both the legacy object-shaped and new scalar-shaped Timing values at runtime.
 
 ### Tests
 
 - Add strict recursive Home Assistant 2026.8.1 Object selector schema validation.
 - Run the standalone validator in CI and reject unknown selector kinds, invalid
   Choose metadata, missing choices/selectors, and direct nested Choose selectors.
+- Add all-five-mode old/new Timing parity, direct-selector UI-shape, malformed-value,
+  and shared Children/Legacy path regressions.
 
 ## v0.3.3 - 2026-08-21
 

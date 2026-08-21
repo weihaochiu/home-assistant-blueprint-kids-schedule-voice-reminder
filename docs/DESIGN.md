@@ -27,6 +27,31 @@ by this Blueprint; it is not a replacement for Home Assistant's Blueprint loader
 Schema source:
 https://github.com/home-assistant/core/blob/2026.8.1/homeassistant/helpers/selector.py
 
+Dynamic collections use Object selectors; scalar choice values use their native
+selectors directly. Children, Events, Schedules, Reminders, and Messages therefore
+remain multiple Object collections. The five Reminder Timing branches are direct
+Time or Number selectors: wrapping one scalar in a non-multiple Object makes
+Frontend 20260729.7 show an extra `增加` action and a form dialog. In the exact
+frontend tag, `ha-selector-object` opens `showFormDialog` for add/edit, while
+`ha-selector-choose` passes the selected branch selector and branch value directly
+to `ha-selector`. Sources:
+
+- https://github.com/home-assistant/frontend/blob/20260729.7/src/components/ha-selector/ha-selector-object.ts
+- https://github.com/home-assistant/frontend/blob/20260729.7/src/components/ha-selector/ha-selector-choose.ts
+- https://github.com/home-assistant/frontend/blob/20260729.7/src/components/ha-selector/ha-selector.ts
+- https://github.com/home-assistant/frontend/blob/20260729.7/src/dialogs/form/show-form-dialog.ts
+
+The exact frontend tag resolves to commit
+`91c28c2f587553a817a315cfbbeee072a6ed5de4`. Import compatibility and editor
+usability are separate release gates.
+
+Changing the selector changes stored branch values from `{time: value}` /
+`{minutes: value}` to scalar values. Runtime normalizes both shapes once before the
+shared scheduling calculation, so existing automation execution remains compatible.
+Frontend Time/Number selectors do not themselves unwrap old mapping values; automatic
+editor migration or prefill is therefore not claimed. Reopening a pre-existing
+v0.3.3 automation remains a required real-HA upgrade test.
+
 ## Queued two-phase scheduler
 
 The minute heartbeat captures `trigger.now` while rendering automation variables.

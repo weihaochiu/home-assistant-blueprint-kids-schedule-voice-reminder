@@ -10,6 +10,34 @@
 - [ ] 沒有 `Invalid blueprint` 或 `extra keys not allowed`
 - [ ] 本節全部通過前，不宣稱 v0.3.3 release-ready
 
+## 0A. HA 2026.8.2 編輯器 UX gate
+
+前一候選 commit `e2ccfb9fe3c5ec15edb12314762f840d2b266fbb` 的 Preview／Import
+通過，但巢狀 scalar Object 編輯 UX 失敗。匯入相容與編輯器可用性是兩個獨立 gate；
+下列 20 項必須全部通過，才能記錄 `MANUAL_HA_GATE=PASS`：
+
+1. [ ] 匯入 exact candidate commit。
+2. [ ] 從 Blueprint 建立 automation。
+3. [ ] 新增 Child。
+4. [ ] 編輯 Child。
+5. [ ] 新增 Event。
+6. [ ] 新增 Schedule。
+7. [ ] 新增 Reminder。
+8. [ ] 選「前一天固定時間」：Time control 直接出現，沒有額外 scalar Object「增加」按鈕。
+9. [ ] 選「當天固定時間」：Time control 直接出現。
+10. [ ] 選「活動／上課前」：Number control 直接出現。
+11. [ ] 選「下課前」：Number control 直接出現。
+12. [ ] 選「下課後」：Number control 直接出現。
+13. [ ] 新增多個 Messages。
+14. [ ] 儲存 Event。
+15. [ ] 儲存 Child。
+16. [ ] 儲存 automation。
+17. [ ] 關閉後重新開啟 automation。
+18. [ ] 確認所有值仍存在且正確。
+19. [ ] 在 Legacy Events 路徑完成同樣 Timing 操作與儲存／重開測試。
+20. [ ] 若可取得既有資料，以一個舊 object-shaped Timing 的 v0.3.3 automation 測試重開；
+    記錄舊值是否顯示，並確認 runtime 仍能依原時間觸發。不要把 editor 自動遷移視為已保證。
+
 ## Selector 與資料模型
 
 - [ ] 五個 sections 正確顯示；假日來源有 Calendar／Workday／Legacy 三項

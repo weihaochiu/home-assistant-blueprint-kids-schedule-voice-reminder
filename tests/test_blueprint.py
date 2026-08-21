@@ -339,25 +339,25 @@ def reminder_due(
     if end <= start:
         end += timedelta(days=1)
     active = timing.get("active_choice", "")
-    branch = timing.get(active, {})
-    if not isinstance(branch, dict):
-        return None
+    branch = timing.get(active)
     kind = timing_kind(timing)
     if kind in {"previous_day_fixed", "same_day_fixed"}:
-        fixed = parse_clock(branch.get("time"))
+        fixed_value = branch.get("time") if isinstance(branch, dict) else branch
+        fixed = parse_clock(fixed_value)
         if fixed is None:
             return None
         day = occurrence_date - timedelta(days=kind == "previous_day_fixed")
         return datetime.combine(day, fixed).replace(second=0, microsecond=0)
-    minutes = branch.get("minutes")
-    if isinstance(minutes, bool):
+    minutes = branch.get("minutes") if isinstance(branch, dict) else branch
+    if isinstance(minutes, bool) or not isinstance(minutes, (int, float)):
         return None
     try:
-        minutes = int(minutes)
-    except (TypeError, ValueError):
+        normalized_minutes = int(minutes)
+    except (OverflowError, ValueError):
         return None
-    if not 1 <= minutes <= 1440:
+    if minutes != normalized_minutes or not 1 <= normalized_minutes <= 1440:
         return None
+    minutes = normalized_minutes
     if kind == "before_start":
         return start - timedelta(minutes=minutes)
     if kind == "before_end":
@@ -675,7 +675,9 @@ def test_dynamic_event_schedule_and_reminder_schema(blueprint: dict) -> None:
     assert [item["value"] for item in weekday_select["options"]] == WEEKDAYS
 
 
-def test_nested_choose_has_five_conditional_timing_forms(blueprint: dict) -> None:
+def test_timing_choices_render_scalar_controls_directly_without_object_dialog(
+    blueprint: dict,
+) -> None:
     inputs = flatten_inputs(blueprint["blueprint"]["input"])
     child_fields = inputs["children"]["selector"]["object"]["fields"]
     event_fields = child_fields["events"]["selector"]["object"]["fields"]
@@ -683,9 +685,12 @@ def test_nested_choose_has_five_conditional_timing_forms(blueprint: dict) -> Non
     choices = reminder_fields["timing"]["selector"]["choose"]["choices"]
     assert set(choices) == TIMING_CHOICES
     for label in ("前一天固定時間", "當天固定時間"):
-        assert set(choices[label]["selector"]["object"]["fields"]) == {"time"}
+        assert choices[label]["selector"] == {"time": None}
     for label in ("活動／上課前", "下課前", "下課後"):
-        assert set(choices[label]["selector"]["object"]["fields"]) == {"minutes"}
+        assert choices[label]["selector"] == {
+            "number": {"min": 1, "max": 1440, "step": 1, "mode": "box"}
+        }
+    assert all("object" not in choice["selector"] for choice in choices.values())
     messages = reminder_fields["messages"]["selector"]["object"]
     assert messages["multiple"] is True
     assert set(messages["fields"]) == {"message"}
@@ -702,6 +707,24 @@ def test_children_and_legacy_share_valid_reminders_selector(blueprint: dict) -> 
     message_field = child_reminders["object"]["fields"]["messages"]
     assert set(message_field) <= OBJECT_SELECTOR_FIELD_ALLOWED_KEYS
     assert "description" not in message_field
+
+
+def test_timing_scalar_controls_apply_to_children_and_legacy_paths(blueprint: dict) -> None:
+    inputs = flatten_inputs(blueprint["blueprint"]["input"])
+    child_events = inputs["children"]["selector"]["object"]["fields"]["events"]
+    child_reminders = child_events["selector"]["object"]["fields"]["reminders"][
+        "selector"
+    ]
+    legacy_reminders = inputs["events"]["selector"]["object"]["fields"]["reminders"][
+        "selector"
+    ]
+    assert child_reminders is legacy_reminders
+    choices = child_reminders["object"]["fields"]["timing"]["selector"]["choose"][
+        "choices"
+    ]
+    assert all(
+        set(choice["selector"]) <= {"time", "number"} for choice in choices.values()
+    )
 
 
 def test_player_tts_and_holiday_selectors(blueprint: dict) -> None:
@@ -796,18 +819,70 @@ def test_all_templates_are_jinja_syntax_valid(blueprint: dict) -> None:
 
 
 @pytest.mark.parametrize(
-    ("active", "branch", "expected"),
+    ("active", "old_branch", "new_branch", "expected"),
     [
-        ("前一天固定時間", {"time": "20:50:00"}, datetime(2026, 8, 17, 20, 50)),
-        ("當天固定時間", {"time": "17:00:00"}, datetime(2026, 8, 18, 17, 0)),
-        ("活動／上課前", {"minutes": 30}, datetime(2026, 8, 18, 17, 30)),
-        ("下課前", {"minutes": 10}, datetime(2026, 8, 18, 19, 20)),
-        ("下課後", {"minutes": 10}, datetime(2026, 8, 18, 19, 40)),
+        (
+            "前一天固定時間",
+            {"time": "20:50:00"},
+            "20:50:00",
+            datetime(2026, 8, 17, 20, 50),
+        ),
+        (
+            "當天固定時間",
+            {"time": "17:00:00"},
+            "17:00:00",
+            datetime(2026, 8, 18, 17, 0),
+        ),
+        ("活動／上課前", {"minutes": 30}, 30, datetime(2026, 8, 18, 17, 30)),
+        ("下課前", {"minutes": 10}, 10, datetime(2026, 8, 18, 19, 20)),
+        ("下課後", {"minutes": 10}, 10, datetime(2026, 8, 18, 19, 40)),
     ],
 )
-def test_five_reminder_datetime_calculations(active, branch, expected) -> None:
-    timing = {"active_choice": active, active: branch}
-    assert reminder_due(expected.date() if active != "前一天固定時間" else datetime(2026, 8, 18).date(), "18:00:00", "19:30:00", timing) == expected
+def test_five_reminder_datetime_calculations_support_old_and_new_shapes(
+    active, old_branch, new_branch, expected
+) -> None:
+    occurrence_date = datetime(2026, 8, 18).date()
+    for branch in (old_branch, new_branch):
+        timing = {"active_choice": active, active: branch}
+        assert reminder_due(
+            occurrence_date, "18:00:00", "19:30:00", timing
+        ) == expected
+
+
+@pytest.mark.parametrize(
+    ("active", "old_branch", "new_branch", "expected"),
+    [
+        (
+            "前一天固定時間",
+            {"time": "20:50:00"},
+            "20:50:00",
+            datetime(2026, 8, 17, 20, 50),
+        ),
+        (
+            "當天固定時間",
+            {"time": "17:00:00"},
+            "17:00:00",
+            datetime(2026, 8, 18, 17, 0),
+        ),
+        ("活動／上課前", {"minutes": 30}, 30, datetime(2026, 8, 18, 17, 30)),
+        ("下課前", {"minutes": 10}, 10, datetime(2026, 8, 18, 19, 20)),
+        ("下課後", {"minutes": 10}, 10, datetime(2026, 8, 18, 19, 40)),
+    ],
+)
+def test_actual_blueprint_old_and_new_timing_shapes_have_identical_due_results(
+    blueprint: dict, active, old_branch, new_branch, expected
+) -> None:
+    def matches(branch):
+        timing = {"active_choice": active, active: branch}
+        event = simple_event(end="19:30:00", timing=timing, policy="run")
+        return render_blueprint_matches(
+            blueprint, [], expected, children=[child("群組", [event])]
+        )
+
+    old_matches = matches(old_branch)
+    new_matches = matches(new_branch)
+    assert len(old_matches) == 1
+    assert new_matches == old_matches
 
 
 def test_fixture_weekday_patterns_and_multiple_schedules(fixtures: dict) -> None:
@@ -1141,10 +1216,12 @@ def relative_due(kind: str, minutes: int) -> datetime:
 
 @pytest.mark.parametrize("kind", ["活動／上課前", "下課前", "下課後"])
 @pytest.mark.parametrize("minutes", [1, 10, 30, 60, 1439, 1440])
+@pytest.mark.parametrize("storage", ["old", "new"])
 def test_actual_blueprint_accepts_relative_minute_boundaries(
-    blueprint: dict, kind: str, minutes: int
+    blueprint: dict, kind: str, minutes: int, storage: str
 ) -> None:
-    timing = {"active_choice": kind, kind: {"minutes": minutes}}
+    branch = {"minutes": minutes} if storage == "old" else minutes
+    timing = {"active_choice": kind, kind: branch}
     event = simple_event(timing=timing, policy="run")
     matches = render_blueprint_matches(
         blueprint, [], relative_due(kind, minutes), children=[child("群組", [event])]
@@ -1154,10 +1231,12 @@ def test_actual_blueprint_accepts_relative_minute_boundaries(
 
 @pytest.mark.parametrize("kind", ["活動／上課前", "下課前", "下課後"])
 @pytest.mark.parametrize("minutes", [0, -1, 1441, 2000, 9999])
+@pytest.mark.parametrize("storage", ["old", "new"])
 def test_actual_blueprint_rejects_out_of_range_relative_minutes(
-    blueprint: dict, kind: str, minutes: int
+    blueprint: dict, kind: str, minutes: int, storage: str
 ) -> None:
-    timing = {"active_choice": kind, kind: {"minutes": minutes}}
+    branch = {"minutes": minutes} if storage == "old" else minutes
+    timing = {"active_choice": kind, kind: branch}
     event = simple_event(timing=timing, policy="run")
     assert render_blueprint_matches(
         blueprint, [], relative_due(kind, minutes), children=[child("群組", [event])]
@@ -1165,15 +1244,42 @@ def test_actual_blueprint_rejects_out_of_range_relative_minutes(
 
 
 @pytest.mark.parametrize("kind", ["活動／上課前", "下課前", "下課後"])
-@pytest.mark.parametrize("minutes", [None, "", "abc", [], {}, True, False])
+@pytest.mark.parametrize("minutes", [None, "", "abc", [], {}, 1.5, True, False])
+@pytest.mark.parametrize("storage", ["old", "new"])
 def test_actual_blueprint_rejects_malformed_relative_minutes_without_error(
-    blueprint: dict, kind: str, minutes: object
+    blueprint: dict, kind: str, minutes: object, storage: str
 ) -> None:
-    timing = {"active_choice": kind, kind: {"minutes": minutes}}
+    branch = {"minutes": minutes} if storage == "old" else minutes
+    timing = {"active_choice": kind, kind: branch}
     event = simple_event(timing=timing, policy="run")
     coerced = 1 if minutes is True else 0
     assert render_blueprint_matches(
         blueprint, [], relative_due(kind, coerced), children=[child("群組", [event])]
+    ) == []
+
+
+@pytest.mark.parametrize("kind", ["活動／上課前", "下課前", "下課後"])
+def test_actual_blueprint_rejects_legacy_mapping_without_minutes(
+    blueprint: dict, kind: str
+) -> None:
+    timing = {"active_choice": kind, kind: {"other": 30}}
+    event = simple_event(timing=timing, policy="run")
+    assert render_blueprint_matches(
+        blueprint, [], relative_due(kind, 30), children=[child("群組", [event])]
+    ) == []
+
+
+@pytest.mark.parametrize("kind", ["前一天固定時間", "當天固定時間"])
+@pytest.mark.parametrize("value", [None, "", "abc", 30, [], {}, True, False])
+@pytest.mark.parametrize("storage", ["old", "new"])
+def test_actual_blueprint_rejects_malformed_fixed_time_without_error(
+    blueprint: dict, kind: str, value: object, storage: str
+) -> None:
+    branch = {"time": value} if storage == "old" else value
+    timing = {"active_choice": kind, kind: branch}
+    event = simple_event(timing=timing, policy="run")
+    assert render_blueprint_matches(
+        blueprint, [], datetime(2026, 8, 18, 17, 0), children=[child("群組", [event])]
     ) == []
 
 
