@@ -1,98 +1,53 @@
 # Kids Schedule Voice Reminder — Design
 
-Version: v0.1.0
+Version: v0.2.0
 
-## Goals
+## Model and compatibility
 
-This repository contains one pure Home Assistant automation Blueprint for fixed
-weekly family schedules. It has no calendar, database, custom integration, or
-external backend dependency.
+The primary model is `children[] -> events[] -> schedules[] + reminders[]`.
+Children inherit `spoken_name || name` into each normalized Event participant.
+Child/Event/Reminder enabled flags apply at their own subtree. A named Child
+makes the primary model authoritative—even when disabled—so legacy data cannot
+unexpectedly play. With no named Child, v0.1 `events[]` is normalized once into
+the same `runtime_events` representation. Runtime IDs contain source, Child index,
+and Event index; indexes are ephemeral and are not persisted identifiers.
 
-## Data model
+The nested Object selectors match the Home Assistant 2026.8.x selector schema:
+Object fields may contain any selector and `multiple: true` produces lists.
+Object selectors expose no reorder option, so source list order is authoritative.
 
-`events` is an `object` selector with `multiple: true`. Each event owns its
-basic information, holiday policy, zero or more schedules, and zero or more
-reminders. Schedules and reminders are nested `object` selectors with
-`multiple: true`, so removing an event removes all of its children without
-affecting other events.
+## Two-phase scheduler and boundaries
 
-An event contains:
+The minute heartbeat captures `trigger.now`. Phase A scans every valid runtime
+Event using occurrence offsets `[-2, -1, 0, 1]`, uniformly for all five timing
+modes. D-2 is required for a Monday 23:00–Tuesday 01:00 overnight Event whose
+after-end offset is 1440 minutes and is due Wednesday 01:00. A key of runtime
+Child/Event identity, occurrence date, Reminder index, and due minute collapses
+duplicate Schedules while retaining independent items. Candidates sort by due,
+Child order, Event order, and Reminder order.
 
-- `name`, `enabled`, `participant`, and `location`
-- `makeup_holiday_behavior`: `skip` or `run`
-- `schedules[]`: `weekdays[]`, `start_time`, and `end_time`
-- `reminders[]`: `name`, `enabled`, `timing`, and `messages[]`
+If Phase A is empty execution stops before Workday and media. Otherwise only
+unique occurrence offsets belonging to `skip` candidates are queried, through
+four fixed `workday.check_date` actions and response variables. This bounds calls
+at four and queries each occurrence date once. Phase B keeps `run`, keeps `skip`
+on boolean true, drops it on boolean false, and fails open for every missing,
+unavailable, error, wrong-key, or malformed response. If Phase B empties the list,
+execution stops before player snapshot, volume, and TTS.
 
-Reminder timing uses a nested Home Assistant `choose` selector. Its five
-choices are previous-day fixed time, same-day fixed time, before start, before
-end, and after end. Each choice shows only the time or minute-offset field it
-needs. Message entries are repeatable objects containing one text field; at
-runtime they become that reminder's private list of message strings.
+A configured Workday entity takes priority. Only when blank does the legacy
+helper bridge apply v0.1 current-state `on + skip` behavior; unavailable is off.
 
-List positions are never persisted. Runtime indexes exist only inside one
-heartbeat and are used to distinguish intentionally separate reminders.
+## Migration
 
-## Holiday policy
+No script touches Home Assistant storage. Users first select a Taiwan Workday
+sensor, then manually recreate legacy Events beneath named Children/Groups.
+During migration, named Children are authoritative and legacy Events remain a
+non-executing fallback; removing all named Children re-enables the legacy adapter.
 
-The global helper is an `input_boolean`. Only the exact state `on` means a
-makeup holiday; `unknown` and `unavailable` fail open as OFF. While ON, an event
-with policy `skip` produces no candidate and an event with policy `run`
-continues normally.
+## Messages and media
 
-The helper represents current state, not a future date. To suppress a
-previous-day reminder for tomorrow's makeup holiday, it must already be ON
-when that reminder is due and remain ON through the holiday.
-
-## Scheduler heartbeat
-
-A `time_pattern` trigger runs every minute. The automation captures
-`trigger.now` and truncates it to minute precision, preserving the actual
-trigger minute if action execution is delayed. It then:
-
-1. scans enabled, valid events;
-2. skips holiday-blocked events;
-3. scans valid schedules;
-4. uses today as the occurrence date, except previous-day reminders use
-   tomorrow;
-5. validates the occurrence weekday and schedule times;
-6. computes each enabled reminder's due timestamp;
-7. compares the due minute with the captured heartbeat minute; and
-8. accumulates every match in a Jinja `namespace()` list.
-
-Candidate keys contain the runtime event index, occurrence date, runtime
-reminder index, and due minute, but not the schedule index. Consequently,
-duplicate schedules collapse while distinct reminders remain independent.
-Candidates are sorted by due minute, event name, and reminder order.
-
-The Blueprint uses Home Assistant local time (`as_local`) and supports weekday
-rollover, including Sunday-to-Monday previous-day reminders. Seconds are
-ignored for matching.
-
-## Messages
-
-Zero valid messages uses a generic event fallback, one always uses that text,
-and two or more use Home Assistant's `random` filter for each actual playback.
-The placeholders `{event}`, `{participant}`, `{location}`, `{start_time}`,
-`{end_time}`, and `{minutes}` are replaced explicitly. User text is never
-evaluated as Jinja.
-
-## TTS playback
-
-No match means no media action. For one or more matches, the Blueprint filters
-unavailable players, snapshots each available player's volume once, sets the
-announcement volume once, and plays all matched messages in deterministic
-order. Each service call has independent error continuation.
-
-After each message, a bounded length-based delay avoids immediately lowering
-the volume. After all messages, a bounded buffering wait is best effort, then
-each numeric original volume is restored once. The `announce` flag exposes
-player-dependent media resume behavior; it cannot guarantee restoration on
-every integration.
-
-## Defensive behavior
-
-Malformed events, empty child lists, missing names/weekdays/times, invalid
-times, non-positive offsets, unavailable helpers, unavailable TTS, unavailable
-players, and missing volume attributes are skipped without blocking valid
-records. There is no persistent reminder history; duplicate suppression is
-limited to one heartbeat execution.
+Reminder messages are private lists: zero valid entries uses fallback, one is
+fixed, and many use `random`. Six placeholders are replaced literally and never
+re-evaluated as Jinja. Available player volumes snapshot/set once, all reminders
+play sequentially, bounded waits reduce overlap, and numeric volumes restore once.
+Media announcement/resume remains best effort.

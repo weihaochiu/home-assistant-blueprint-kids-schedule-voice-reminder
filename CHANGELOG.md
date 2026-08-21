@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented here.
 
+## v0.2.0 - 2026-08-21
+
+### Added
+
+- Dynamic Children/shared groups with inherited spoken names and nested Events.
+- Automatic occurrence-date Workday checks with per-Event non-workday policy.
+- v0.1 legacy Events/helper compatibility bridge and documented migration path.
+
+### Fixed
+
+- Uniform D-2 through D+1 occurrence scan, including overnight +1439/+1440 reminders.
+- Stable same-minute ordering by due, Child, Event, and Reminder input order.
+- Workday query deduplication, no-candidate short circuit, and fail-open responses.
+- GitHub Actions upgraded to Node 24-based checkout/setup-python releases.
+
+### Changed
+
+- Primary terminology and policy changed from manual makeup-holiday mode to Workday/non-workday.
+- New-model participant values are inherited from the parent Child/Group.
+
 ## v0.1.0 - 2026-08-21
 
 ### Added

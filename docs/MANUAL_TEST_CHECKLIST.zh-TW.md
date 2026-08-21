@@ -1,79 +1,36 @@
-# Home Assistant 實機測試清單 — v0.1.0
+# Home Assistant 實機測試清單 — v0.2.0
 
-自動化測試不能取代 Home Assistant frontend、實際 TTS 與播放器驗證。請記錄 HA 版本、
-TTS provider、播放器型號／整合、automation trace 及結果；分享 trace 前先遮蔽私人資料。
+請記錄 HA 版本、TTS、播放器整合、automation trace 與結果；分享前遮蔽私人資料。
 
-## Blueprint 與動態 UI
+## Selector 與資料模型
 
-- [ ] 匯入 Blueprint
-- [ ] 建立 automation
-- [ ] 四個 UI sections 正確顯示
-- [ ] 新增 Event
-- [ ] 刪除 Event，且其他 Event 不受影響
-- [ ] 新增 Schedule
-- [ ] 刪除 Schedule
-- [ ] 新增 Reminder
-- [ ] 刪除 Reminder，且其他 Reminder 不受影響
-- [ ] Event disable
-- [ ] Reminder disable
-- [ ] 空 Event list 不呼叫播放器
+- [ ] 五個 sections 正確顯示，Workday 只列出該 integration 的 binary_sensor
+- [ ] 新增兩個 Children 及一個共用群組，spoken_name fallback 正確
+- [ ] 各 Child 新增／刪除 Event、Schedule、Reminder
+- [ ] 停用 Child 關閉完整子樹；停用 Event／Reminder 只關閉該層
+- [ ] Children 有具名稱項目時舊 Events 不播放；Children 空白時舊 Events 正常
+- [ ] 確認 Object selector 沒有拖曳重排，YAML 順序與播放順序一致
 
-## 排程與時間計算
+## Workday／非工作日
 
-- [ ] Monday–Friday schedule
-- [ ] multiple schedules（Mon／Wed／Fri 不同開始時間）
-- [ ] previous-day reminder
-- [ ] Monday Event 的 previous-day reminder 在 Sunday 播放
-- [ ] Sunday Event 的 previous-day reminder 在 Saturday 播放
-- [ ] same-day reminder
-- [ ] before-start 30
-- [ ] before-start 10
-- [ ] before-end
-- [ ] after-end
-- [ ] 同一 Event 多個課前 Reminder 各有不同 message
-- [ ] 同分鐘多 Reminder 全部播放
-- [ ] 同分鐘多 Event 全部播放
-- [ ] 重複 Schedule 不重播同一 candidate
-- [ ] heartbeat action 延遲數秒仍依 trigger minute 判斷
+- [ ] 台灣一般工作日：skip 與 run 都播放
+- [ ] 台灣非工作日：skip 不播放、run 播放
+- [ ] Monday 前一天提醒查詢 Tuesday Event 發生日
+- [ ] Workday unavailable／action error／缺回傳時 fail-open
+- [ ] 同日期多個 skip 候選 trace 中只呼叫一次 check_date
+- [ ] 沒有候選時 trace 中沒有 Workday 與媒體 action
+- [ ] 全部被非工作日濾除時沒有 snapshot、volume、TTS
+- [ ] Workday 與 legacy helper 同時設定時 Workday 優先
+- [ ] Workday 留空時 legacy helper on + skip 保留 v0.1 行為
 
-## 補假
+## 排程、訊息與播放
 
-- [ ] 補假 OFF + skip Event 正常
-- [ ] 補假 ON + skip Event 不提醒
-- [ ] 補假 ON + run Event 正常
-- [ ] helper unknown／unavailable 視為 OFF
-- [ ] 前一天提醒時間前已 ON，隔日 skip Event 的 previous-day reminder 被阻擋
-
-## 訊息
-
-- [ ] 0 個有效 message 使用 fallback
-- [ ] 1 個 message 固定播放
-- [ ] 2 個以上 message 只選其中一個
-- [ ] `{event}`、`{participant}`、`{location}` 正確替換
-- [ ] `{start_time}`、`{end_time}`、`{minutes}` 正確替換
-- [ ] 看似 Jinja 的使用者文字不會二次執行
-
-## TTS 與播放器
-
-- [ ] 單一 media player
-- [ ] 多 media player
-- [ ] unavailable player 被跳過，其他台仍播放
-- [ ] TTS unavailable 安全跳過
-- [ ] 原音量恢復
-- [ ] 沒有 volume_level 的播放器不造成失敗
-- [ ] 同分鐘多訊息只升音量一次、最後恢復一次
-- [ ] 長訊息不會一開始就恢復音量
-- [ ] buffering timeout 後仍執行恢復
-- [ ] announce/media resume 開啟
-- [ ] announce/media resume 關閉
-- [ ] 播放中媒體能否恢復（記錄整合實際能力）
-
-## 異常資料與觀察
-
-- [ ] 空 Schedule list
-- [ ] 空 Reminder list
-- [ ] 空 message list
-- [ ] 刻意修改 YAML 造成無 name，其他 Event 仍正常
-- [ ] 刻意修改 YAML 造成無 weekdays／錯誤 time，其他 Event 仍正常
-- [ ] offset 為 0／負數／無效值時安全跳過
-- [ ] Automation trace 不含私人 token、密碼或未遮蔽家庭資訊
+- [ ] 五種 timing 與 Mon–Fri／不同時間多 Schedule
+- [ ] 跨午夜 Event 的 before／after reminder
+- [ ] Monday 23:00–Tuesday 01:00 +1439 與 +1440 在 Wednesday 播放
+- [ ] 同分鐘不同 Children／Events／Reminders 全部依輸入順序播放
+- [ ] 重複 Schedule 只播放一次；trigger 延遲仍依 captured minute
+- [ ] 六個 placeholders、0/1/多句、Jinja-like 純文字
+- [ ] 多播放器、unavailable 隔離、音量只設定／恢復一次
+- [ ] TTS unavailable、無 volume_level、buffering timeout 安全
+- [ ] announce/resume 開關及播放器實際恢復能力

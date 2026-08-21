@@ -1,9 +1,8 @@
 blueprint:
-  name: Kids Schedule Voice Reminder（小孩行程與接送語音提醒）· v0.1.0
+  name: Kids Schedule Voice Reminder（小孩行程與接送語音提醒）· v0.2.0
   description: >-
-    版本：v0.1.0。最低 Home Assistant：2026.1.0。
-    以可新增／刪除的事件、每週時段與個別提醒管理小孩行程；支援補假政策、
-    五種提醒時間、多播放器 TTS、個別音量恢復與 best-effort announcement。
+    版本：v0.2.0。最低 Home Assistant：2026.1.0。以動態 Children／群組、Events、
+    時段與提醒管理行程；依 Workday 活動發生日處理非工作日，並相容 v0.1 Events。
   domain: automation
   author: weihaochiu
   source_url: >-
@@ -11,75 +10,212 @@ blueprint:
   homeassistant:
     min_version: 2026.1.0
   input:
-    holiday_section:
-      name: 📅 補假控制
-      icon: mdi:calendar-remove
+    workday_section:
+      name: 📅 Workday／非工作日
+      icon: mdi:calendar-check
       description: >-
-        目前 Blueprint：v0.1.0。只有 helper 狀態為 on 才視為補假；unknown／unavailable
-        視為 off。前一天提醒要被隔日補假阻擋時，請在提醒前先開啟 helper。
+        v0.2.0 查詢活動發生日（不是播報日）。查詢失敗、實體不可用或回傳缺漏時採 fail-open；
+        沒有候選提醒時不呼叫 Workday action。
       input:
-        makeup_holiday_entity:
-          name: 補假開關
-          description: 請選擇一個 input_boolean；不會寫死任何家庭 entity_id。
+        workday_entity:
+          name: Workday 實體（建議）
+          description: 留空才使用 v0.1 補假 helper；兩者都有設定時以 Workday 為準。
+          default: ""
           selector:
             entity:
               filter:
-                - domain: input_boolean
-
+                - integration: workday
+                  domain: binary_sensor
     playback_section:
       name: 🔊 TTS 與播放器
       icon: mdi:account-voice
       input:
         media_players:
           name: 播放器
-          description: 可選多台；每台獨立處理失敗與原音量。
           selector:
             entity:
               multiple: true
-              filter:
-                - domain: media_player
+              filter: [{domain: media_player}]
         tts_entity:
           name: TTS 實體
           selector:
             entity:
-              filter:
-                - domain: tts
+              filter: [{domain: tts}]
         tts_language:
           name: TTS 語言
           default: zh-tw
-          selector:
-            text:
+          selector: {text: null}
         announcement_volume:
           name: 播報音量
           default: 0.75
           selector:
-            number:
-              min: 0
-              max: 1
-              step: 0.05
-              mode: slider
+            number: {min: 0, max: 1, step: 0.05, mode: slider}
         restore_original_volume:
           name: 恢復各播放器原音量
           default: true
-          selector:
-            boolean:
+          selector: {boolean: null}
         attempt_media_resume:
           name: 嘗試恢復原本媒體
-          description: >-
-            開啟會傳送 announce: true；實際暫停／恢復能力取決於播放器與整合。
+          description: 傳送 announce；實際能力取決於播放器與整合。
           default: false
-          selector:
-            boolean:
-
-    events_section:
-      name: 👧 行程事件
-      icon: mdi:calendar-account
+          selector: {boolean: null}
+    children_section:
+      name: 👧 Children／群組與 Events
+      icon: mdi:account-group
       description: >-
-        新增任意數量的事件；刪除事件會一併刪除其所有時段與提醒。沒有固定 Event 編號。
+        刪除 Child 會刪除其子樹；停用 Child 會停用其子樹。Object selector 沒有拖曳重排，
+        播放順序依 Child、Event、Reminder 的畫面／YAML 輸入順序。
       input:
+        children:
+          name: Children／群組
+          description: 有至少一個具名稱項目時只使用此處；共同行程可建群組。
+          default: []
+          selector:
+            object:
+              multiple: true
+              label_field: name
+              description_field: spoken_name
+              fields:
+                name: &required_text
+                  label: 孩子／群組名稱
+                  required: true
+                  selector: {text: null}
+                enabled: &required_enabled
+                  label: 啟用
+                  required: true
+                  selector: {boolean: null}
+                spoken_name:
+                  label: 播報稱呼（選填；預設使用名稱）
+                  selector: {text: null}
+                events:
+                  label: Events
+                  required: true
+                  selector:
+                    object: &event_object
+                      multiple: true
+                      label_field: name
+                      description_field: location
+                      fields:
+                        name:
+                          label: 事件名稱
+                          required: true
+                          selector: {text: null}
+                        enabled: *required_enabled
+                        location:
+                          label: 地點（選填）
+                          selector: {text: null}
+                        non_workday_behavior:
+                          label: 非工作日政策
+                          required: true
+                          selector:
+                            select:
+                              custom_value: false
+                              mode: dropdown
+                              options:
+                                - {label: 非工作日停用, value: skip}
+                                - {label: 非工作日仍照常, value: run}
+                        schedules:
+                          label: 上課／活動時段
+                          required: true
+                          selector: &schedules_selector
+                            object:
+                              multiple: true
+                              label_field: start_time
+                              description_field: end_time
+                              fields:
+                                weekdays:
+                                  label: 星期
+                                  required: true
+                                  selector:
+                                    select:
+                                      multiple: true
+                                      custom_value: false
+                                      mode: dropdown
+                                      options:
+                                        - {label: 星期一, value: monday}
+                                        - {label: 星期二, value: tuesday}
+                                        - {label: 星期三, value: wednesday}
+                                        - {label: 星期四, value: thursday}
+                                        - {label: 星期五, value: friday}
+                                        - {label: 星期六, value: saturday}
+                                        - {label: 星期日, value: sunday}
+                                start_time:
+                                  label: 開始時間
+                                  required: true
+                                  selector: {time: null}
+                                end_time:
+                                  label: 結束時間
+                                  required: true
+                                  selector: {time: null}
+                        reminders:
+                          label: 提醒
+                          selector: &reminders_selector
+                            object:
+                              multiple: true
+                              label_field: name
+                              description_field: timing
+                              fields:
+                                name:
+                                  label: 提醒名稱
+                                  required: true
+                                  selector: {text: null}
+                                enabled: *required_enabled
+                                timing:
+                                  label: 提醒時間
+                                  required: true
+                                  selector:
+                                    choose:
+                                      choices:
+                                        前一天固定時間: &fixed_choice
+                                          selector:
+                                            object:
+                                              fields:
+                                                time:
+                                                  label: 播報時間
+                                                  required: true
+                                                  selector: {time: null}
+                                        當天固定時間: *fixed_choice
+                                        活動／上課前: &minutes_choice
+                                          selector:
+                                            object:
+                                              fields:
+                                                minutes:
+                                                  label: 分鐘數
+                                                  required: true
+                                                  selector:
+                                                    number: {min: 1, max: 1440, step: 1, mode: box}
+                                        下課前: *minutes_choice
+                                        下課後: *minutes_choice
+                                messages:
+                                  label: 播報內容
+                                  description: >-
+                                    一句固定、多句隨機、空白用 fallback。支援 {event}、
+                                    {participant}、{location}、{start_time}、{end_time}、{minutes}。
+                                  selector:
+                                    object:
+                                      multiple: true
+                                      label_field: message
+                                      fields:
+                                        message:
+                                          label: 訊息
+                                          required: true
+                                          selector:
+                                            text: {multiline: true}
+    legacy_section:
+      name: ⚠️ v0.1 相容性／舊 Events
+      icon: mdi:history
+      collapsed: true
+      description: Children 沒有具名稱項目時才使用；新安裝請勿使用。
+      input:
+        makeup_holiday_entity:
+          name: 舊補假開關（相容橋接）
+          description: 選填；只在 Workday 留空時使用，unknown／unavailable 視為 off。
+          default: ""
+          selector:
+            entity:
+              filter: [{domain: input_boolean}]
         events:
-          name: Events
-          description: 每個事件可有任意數量的每週時段與獨立提醒。
+          name: 舊 Events
           default: []
           selector:
             object:
@@ -90,167 +226,29 @@ blueprint:
                 name:
                   label: 事件名稱
                   required: true
-                  selector:
-                    text:
-                enabled:
-                  label: 啟用事件
-                  required: true
-                  selector:
-                    boolean:
+                  selector: {text: null}
+                enabled: *required_enabled
                 participant:
-                  label: 對象／孩子（選填）
-                  selector:
-                    text:
+                  label: 對象／孩子
+                  selector: {text: null}
                 location:
-                  label: 地點（選填）
-                  selector:
-                    text:
+                  label: 地點
+                  selector: {text: null}
                 makeup_holiday_behavior:
-                  label: 補假政策
+                  label: 舊補假政策
                   required: true
                   selector:
                     select:
-                      custom_value: false
-                      mode: dropdown
                       options:
-                        - label: 補假時停用
-                          value: skip
-                        - label: 補假仍照常
-                          value: run
+                        - {label: 補假時停用, value: skip}
+                        - {label: 補假仍照常, value: run}
                 schedules:
                   label: 上課／活動時段
                   required: true
-                  selector:
-                    object:
-                      multiple: true
-                      label_field: start_time
-                      description_field: end_time
-                      fields:
-                        weekdays:
-                          label: 星期
-                          required: true
-                          selector:
-                            select:
-                              multiple: true
-                              custom_value: false
-                              mode: dropdown
-                              options:
-                                - {label: 星期一, value: monday}
-                                - {label: 星期二, value: tuesday}
-                                - {label: 星期三, value: wednesday}
-                                - {label: 星期四, value: thursday}
-                                - {label: 星期五, value: friday}
-                                - {label: 星期六, value: saturday}
-                                - {label: 星期日, value: sunday}
-                        start_time:
-                          label: 開始時間
-                          required: true
-                          selector:
-                            time:
-                        end_time:
-                          label: 結束時間
-                          required: true
-                          selector:
-                            time:
+                  selector: *schedules_selector
                 reminders:
                   label: 提醒
-                  selector:
-                    object:
-                      multiple: true
-                      label_field: name
-                      description_field: timing
-                      fields:
-                        name:
-                          label: 提醒名稱
-                          required: true
-                          selector:
-                            text:
-                        enabled:
-                          label: 啟用提醒
-                          required: true
-                          selector:
-                            boolean:
-                        timing:
-                          label: 提醒時間
-                          required: true
-                          selector:
-                            choose:
-                              choices:
-                                前一天固定時間:
-                                  selector:
-                                    object:
-                                      fields:
-                                        time:
-                                          label: 前一天播報時間
-                                          required: true
-                                          selector:
-                                            time:
-                                當天固定時間:
-                                  selector:
-                                    object:
-                                      fields:
-                                        time:
-                                          label: 當天播報時間
-                                          required: true
-                                          selector:
-                                            time:
-                                活動／上課前:
-                                  selector:
-                                    object:
-                                      fields:
-                                        minutes:
-                                          label: 開始前分鐘數
-                                          required: true
-                                          selector:
-                                            number:
-                                              min: 1
-                                              max: 1440
-                                              step: 1
-                                              mode: box
-                                下課前:
-                                  selector:
-                                    object:
-                                      fields:
-                                        minutes:
-                                          label: 結束前分鐘數
-                                          required: true
-                                          selector:
-                                            number:
-                                              min: 1
-                                              max: 1440
-                                              step: 1
-                                              mode: box
-                                下課後:
-                                  selector:
-                                    object:
-                                      fields:
-                                        minutes:
-                                          label: 結束後分鐘數
-                                          required: true
-                                          selector:
-                                            number:
-                                              min: 1
-                                              max: 1440
-                                              step: 1
-                                              mode: box
-                        messages:
-                          label: 播報內容
-                          description: >-
-                            可新增多句；一個固定、多個隨機、空白則使用內建 fallback。
-                            支援 {event}、{participant}、{location}、{start_time}、
-                            {end_time}、{minutes}。
-                          selector:
-                            object:
-                              multiple: true
-                              label_field: message
-                              fields:
-                                message:
-                                  label: 訊息
-                                  required: true
-                                  selector:
-                                    text:
-                                      multiline: true
-
+                  selector: *reminders_selector
     advanced_section:
       name: ⚙️ 進階設定
       icon: mdi:cog
@@ -260,42 +258,26 @@ blueprint:
           name: 每句最短等待秒數
           default: 8
           selector:
-            number:
-              min: 1
-              max: 60
-              step: 1
-              mode: box
+            number: {min: 1, max: 60, step: 1, mode: box}
         maximum_tts_wait:
           name: 每句最長等待秒數
           default: 120
           selector:
-            number:
-              min: 10
-              max: 300
-              step: 1
-              mode: box
+            number: {min: 10, max: 300, step: 1, mode: box}
         buffering_timeout:
           name: Buffering 額外等待秒數
           default: 10
           selector:
-            number:
-              min: 0
-              max: 60
-              step: 1
-              mode: box
+            number: {min: 0, max: 60, step: 1, mode: box}
 
-# parallel 避免前一分鐘的 TTS 等待阻塞下一個 heartbeat。每次執行固定 trigger.now，
-# 不會因 action 延後而改用較晚的 now() 重算。
 mode: parallel
 max: 10
 max_exceeded: warning
-
 triggers:
-  - trigger: time_pattern
-    minutes: "/1"
-    id: heartbeat
+  - {trigger: time_pattern, minutes: /1, id: heartbeat}
 
 variables:
+  workday_entity_input: !input workday_entity
   makeup_holiday_entity_input: !input makeup_holiday_entity
   media_players_input: !input media_players
   tts_entity_input: !input tts_entity
@@ -303,145 +285,146 @@ variables:
   announcement_volume_input: !input announcement_volume
   restore_original_volume_input: !input restore_original_volume
   attempt_media_resume_input: !input attempt_media_resume
+  children_input: !input children
   events_input: !input events
   minimum_tts_wait_input: !input minimum_tts_wait
   maximum_tts_wait_input: !input maximum_tts_wait
   buffering_timeout_input: !input buffering_timeout
-  check_time: >-
-    {{ as_timestamp(trigger.now if trigger is defined and trigger.now is defined else now()) }}
+  check_time: "{{ as_timestamp(trigger.now if trigger is defined and trigger.now is defined else now()) }}"
   check_minute: "{{ ((check_time | float(0)) // 60 * 60) | int }}"
-  holiday_active: "{{ is_state(makeup_holiday_entity_input, 'on') }}"
-  weekday_names:
-    - monday
-    - tuesday
-    - wednesday
-    - thursday
-    - friday
-    - saturday
-    - sunday
-  matched_reminders: >-
+  weekday_names: [monday, tuesday, wednesday, thursday, friday, saturday, sunday]
+  valid_children: >-
+    {%- set source = children_input if children_input is iterable and children_input is not string
+      and children_input is not mapping else [] -%}
+    {%- set ns = namespace(items=[]) -%}
+    {%- for child in source if child is mapping -%}
+      {%- if child.get('name', '') | string | trim | length > 0 -%}
+        {%- set ns.items = ns.items + [child] -%}
+      {%- endif -%}
+    {%- endfor -%}{{- ns.items -}}
+  runtime_events: >-
+    {%- set ns = namespace(items=[]) -%}
+    {%- if valid_children | count > 0 -%}
+      {%- for child in valid_children -%}
+        {%- set ci = loop.index0 -%}
+        {%- set spoken = child.get('spoken_name', '') | string | trim -%}
+        {%- set participant = spoken if spoken else child.get('name', '') | string | trim -%}
+        {%- set source = child.get('events', []) -%}
+        {%- set source = source if source is iterable and source is not string and source is not mapping else [] -%}
+        {%- for event in source if event is mapping -%}
+          {%- set ei = loop.index0 -%}
+          {%- set ns.items = ns.items + [dict(event, participant=participant,
+            child_name=child.get('name', '') | string | trim,
+            child_enabled=child.get('enabled', true) | bool, child_order=ci, event_order=ei,
+            runtime_id='child|' ~ ci ~ '|' ~ ei,
+            non_workday_behavior=event.get('non_workday_behavior', 'skip'))] -%}
+        {%- endfor -%}
+      {%- endfor -%}
+    {%- else -%}
+      {%- set source = events_input if events_input is iterable and events_input is not string
+        and events_input is not mapping else [] -%}
+      {%- for event in source if event is mapping -%}
+        {%- set ei = loop.index0 -%}
+        {%- set ns.items = ns.items + [dict(event,
+          participant=event.get('participant', '') | string | trim, child_enabled=true,
+          child_name=event.get('participant', '') | string | trim,
+          child_order=0, event_order=ei, runtime_id='legacy|' ~ ei,
+          non_workday_behavior=event.get('makeup_holiday_behavior', 'skip'))] -%}
+      {%- endfor -%}
+    {%- endif -%}{{- ns.items -}}
+  raw_candidates: >-
     {%- set check_dt = as_local(as_datetime(check_minute | int)) -%}
     {%- set day_start = check_dt.replace(hour=0, minute=0, second=0, microsecond=0) -%}
-    {%- set raw_events = events_input if events_input is iterable
-      and events_input is not string and events_input is not mapping else [] -%}
     {%- set ns = namespace(items=[], keys=[]) -%}
-    {%- for event in raw_events if event is mapping -%}
-      {%- set event_index = loop.index0 -%}
-      {%- set event_name = event.get('name', '') | string | trim -%}
-      {%- set event_enabled = event.get('enabled', true) | bool -%}
-      {%- set holiday_policy = event.get('makeup_holiday_behavior', 'skip') | string -%}
-      {%- set holiday_blocked = holiday_active and holiday_policy == 'skip' -%}
+    {%- for event in runtime_events if event is mapping -%}
+      {%- set name = event.get('name', '') | string | trim -%}
       {%- set schedules = event.get('schedules', []) -%}
       {%- set reminders = event.get('reminders', []) -%}
-      {%- if event_enabled and event_name | length > 0 and not holiday_blocked
-          and schedules is iterable and schedules is not string and schedules is not mapping
-          and reminders is iterable and reminders is not string and reminders is not mapping -%}
+      {%- if event.get('child_enabled', true) | bool and event.get('enabled', true) | bool and name
+        and schedules is iterable and schedules is not string and schedules is not mapping
+        and reminders is iterable and reminders is not string and reminders is not mapping -%}
         {%- for schedule in schedules if schedule is mapping -%}
           {%- set weekdays = schedule.get('weekdays', []) -%}
           {%- set weekdays = [weekdays] if weekdays is string else weekdays -%}
-          {%- set start_raw = schedule.get('start_time', '') | string -%}
-          {%- set end_raw = schedule.get('end_time', '') | string -%}
-          {%- set start_parts = start_raw.split(':') -%}
-          {%- set end_parts = end_raw.split(':') -%}
-          {%- set sh = start_parts[0] | int(-1) if start_parts | count >= 2 else -1 -%}
-          {%- set sm = start_parts[1] | int(-1) if start_parts | count >= 2 else -1 -%}
-          {%- set ss = start_parts[2] | int(-1) if start_parts | count >= 3 else 0 -%}
-          {%- set eh = end_parts[0] | int(-1) if end_parts | count >= 2 else -1 -%}
-          {%- set em = end_parts[1] | int(-1) if end_parts | count >= 2 else -1 -%}
-          {%- set es = end_parts[2] | int(-1) if end_parts | count >= 3 else 0 -%}
-          {%- set valid_times = 0 <= sh <= 23 and 0 <= sm <= 59 and 0 <= ss <= 59
+          {%- set sp = (schedule.get('start_time', '') | string).split(':') -%}
+          {%- set ep = (schedule.get('end_time', '') | string).split(':') -%}
+          {%- set sh = sp[0] | int(-1) if sp | count >= 2 else -1 -%}
+          {%- set sm = sp[1] | int(-1) if sp | count >= 2 else -1 -%}
+          {%- set ss = sp[2] | int(-1) if sp | count >= 3 else 0 -%}
+          {%- set eh = ep[0] | int(-1) if ep | count >= 2 else -1 -%}
+          {%- set em = ep[1] | int(-1) if ep | count >= 2 else -1 -%}
+          {%- set es = ep[2] | int(-1) if ep | count >= 3 else 0 -%}
+          {%- set valid = 0 <= sh <= 23 and 0 <= sm <= 59 and 0 <= ss <= 59
             and 0 <= eh <= 23 and 0 <= em <= 59 and 0 <= es <= 59 -%}
-          {%- if valid_times and weekdays is iterable and weekdays is not mapping -%}
+          {%- if valid and weekdays is iterable and weekdays is not mapping -%}
             {%- for reminder in reminders if reminder is mapping -%}
-              {%- set reminder_index = loop.index0 -%}
-              {%- set reminder_enabled = reminder.get('enabled', true) | bool -%}
+              {%- set ri = loop.index0 -%}
               {%- set timing = reminder.get('timing', {}) -%}
-              {%- if reminder_enabled and timing is mapping -%}
-                {%- set timing_type = timing.get('active_choice', '') | string -%}
-                {%- if timing_type == '前一天固定時間' -%}
-                  {%- set day_offsets = [1] -%}
-                {%- elif timing_type in ['活動／上課前', '下課前'] -%}
-                  {%- set day_offsets = [0, 1] -%}
-                {%- elif timing_type == '下課後' -%}
-                  {%- set day_offsets = [0, -1] -%}
-                {%- elif timing_type == '當天固定時間' -%}
-                  {%- set day_offsets = [0] -%}
-                {%- else -%}
-                  {%- set day_offsets = [] -%}
-                {%- endif -%}
-                {%- for day_offset in day_offsets -%}
-                  {%- set occurrence_day = day_start + timedelta(days=day_offset) -%}
-                  {%- set occurrence_weekday = weekday_names[occurrence_day.weekday()] -%}
-                  {%- if occurrence_weekday in weekdays -%}
-                  {%- set occurrence_start = occurrence_day + timedelta(
-                    hours=sh, minutes=sm, seconds=ss) -%}
-                  {%- set occurrence_end = occurrence_day + timedelta(
-                    hours=eh, minutes=em, seconds=es) -%}
-                  {%- if occurrence_end <= occurrence_start -%}
-                    {%- set occurrence_end = occurrence_end + timedelta(days=1) -%}
-                  {%- endif -%}
-                  {%- set branch = timing.get(timing_type, {}) -%}
-                  {%- set branch = branch if branch is mapping else {} -%}
-                  {%- set minutes = branch.get('minutes', 0) | int(0) -%}
-                  {%- set due = none -%}
-                  {%- if timing_type in ['前一天固定時間', '當天固定時間'] -%}
-                    {%- set fixed_raw = branch.get('time', '') | string -%}
-                    {%- set fixed_parts = fixed_raw.split(':') -%}
-                    {%- set fh = fixed_parts[0] | int(-1) if fixed_parts | count >= 2 else -1 -%}
-                    {%- set fm = fixed_parts[1] | int(-1) if fixed_parts | count >= 2 else -1 -%}
-                    {%- if 0 <= fh <= 23 and 0 <= fm <= 59 -%}
-                      {%- set fixed_day = occurrence_day - timedelta(days=1)
-                        if timing_type == '前一天固定時間' else occurrence_day -%}
-                      {%- set due = fixed_day + timedelta(hours=fh, minutes=fm) -%}
+              {%- if reminder.get('enabled', true) | bool and timing is mapping -%}
+                {%- set kind = timing.get('active_choice', '') | string -%}
+                {%- for offset in [-2, -1, 0, 1] -%}
+                  {%- set day = day_start + timedelta(days=offset) -%}
+                  {%- if weekday_names[day.weekday()] in weekdays -%}
+                    {%- set start = day + timedelta(hours=sh, minutes=sm, seconds=ss) -%}
+                    {%- set end = day + timedelta(hours=eh, minutes=em, seconds=es) -%}
+                    {%- if end <= start -%}{%- set end = end + timedelta(days=1) -%}{%- endif -%}
+                    {%- set branch = timing.get(kind, {}) -%}
+                    {%- set branch = branch if branch is mapping else {} -%}
+                    {%- set minutes = branch.get('minutes', 0) | int(0) -%}
+                    {%- set due = none -%}
+                    {%- if kind in ['前一天固定時間', '當天固定時間'] -%}
+                      {%- set fp = (branch.get('time', '') | string).split(':') -%}
+                      {%- set fh = fp[0] | int(-1) if fp | count >= 2 else -1 -%}
+                      {%- set fm = fp[1] | int(-1) if fp | count >= 2 else -1 -%}
+                      {%- if 0 <= fh <= 23 and 0 <= fm <= 59 -%}
+                        {%- set fixed_day = day - timedelta(days=1) if kind == '前一天固定時間' else day -%}
+                        {%- set due = fixed_day + timedelta(hours=fh, minutes=fm) -%}
+                      {%- endif -%}
+                    {%- elif kind == '活動／上課前' and minutes > 0 -%}
+                      {%- set due = start - timedelta(minutes=minutes) -%}
+                    {%- elif kind == '下課前' and minutes > 0 -%}
+                      {%- set due = end - timedelta(minutes=minutes) -%}
+                    {%- elif kind == '下課後' and minutes > 0 -%}
+                      {%- set due = end + timedelta(minutes=minutes) -%}
                     {%- endif -%}
-                  {%- elif timing_type == '活動／上課前' and minutes > 0 -%}
-                    {%- set due = occurrence_start - timedelta(minutes=minutes) -%}
-                  {%- elif timing_type == '下課前' and minutes > 0 -%}
-                    {%- set due = occurrence_end - timedelta(minutes=minutes) -%}
-                  {%- elif timing_type == '下課後' and minutes > 0 -%}
-                    {%- set due = occurrence_end + timedelta(minutes=minutes) -%}
-                  {%- endif -%}
-                  {%- if due is not none -%}
-                    {%- set due_minute = (as_timestamp(due) // 60 * 60) | int -%}
-                    {%- set key = event_index ~ '|' ~ occurrence_day.date() ~ '|'
-                      ~ reminder_index ~ '|' ~ due_minute -%}
-                    {%- if due_minute == check_minute | int and key not in ns.keys -%}
-                      {%- set raw_messages = reminder.get('messages', []) -%}
-                      {%- set raw_messages = raw_messages if raw_messages is iterable
-                        and raw_messages is not string and raw_messages is not mapping else [] -%}
-                      {%- set msg_ns = namespace(values=[]) -%}
-                      {%- for item in raw_messages -%}
-                        {%- set value = item.get('message', '') if item is mapping else item -%}
-                        {%- set value = value | string | trim -%}
-                        {%- if value | length > 0 -%}
-                          {%- set msg_ns.values = msg_ns.values + [value] -%}
-                        {%- endif -%}
-                      {%- endfor -%}
-                        {%- set template = msg_ns.values | random if msg_ns.values | count > 0
-                          else ((event.get('participant', '') | string | trim ~ '的')
-                        if event.get('participant', '') | string | trim | length > 0 else '')
-                        ~ event_name ~ '提醒時間到了。' -%}
-                      {%- set start_display = '%02d:%02d' | format(sh, sm) -%}
-                      {%- set end_display = '%02d:%02d' | format(eh, em) -%}
-                      {%- set message = template
-                        | replace('{event}', event_name)
-                        | replace('{participant}', event.get('participant', '') | string | trim)
-                        | replace('{location}', event.get('location', '') | string | trim)
-                        | replace('{start_time}', start_display)
-                        | replace('{end_time}', end_display)
-                        | replace('{minutes}', minutes | string) -%}
-                      {%- set ns.keys = ns.keys + [key] -%}
-                      {%- set ns.items = ns.items + [{
-                        'key': key,
-                        'due_minute': due_minute,
-                        'event': event_name,
-                        'reminder_order': reminder_index,
-                        'message': message,
-                        'sort_key': due_minute ~ '|' ~ event_name ~ '|'
-                          ~ ('%06d' | format(reminder_index))
-                      }] -%}
+                    {%- if due is not none -%}
+                      {%- set due_minute = (as_timestamp(due) // 60 * 60) | int -%}
+                      {%- set key = event.runtime_id ~ '|' ~ day.date() ~ '|' ~ ri ~ '|' ~ due_minute -%}
+                      {%- if due_minute == check_minute | int and key not in ns.keys -%}
+                        {%- set raw_messages = reminder.get('messages', []) -%}
+                        {%- set raw_messages = raw_messages if raw_messages is iterable
+                          and raw_messages is not string and raw_messages is not mapping else [] -%}
+                        {%- set msgs = namespace(values=[]) -%}
+                        {%- for item in raw_messages -%}
+                          {%- set value = item.get('message', '') if item is mapping else item -%}
+                          {%- if value | string | trim -%}
+                            {%- set msgs.values = msgs.values + [value | string | trim] -%}
+                          {%- endif -%}
+                        {%- endfor -%}
+                        {%- set participant = event.get('participant', '') | string | trim -%}
+                        {%- set text = msgs.values | random if msgs.values else
+                          ((participant ~ '的') if participant else '') ~ name ~ '提醒時間到了。' -%}
+                        {%- set message = text | replace('{event}', name)
+                          | replace('{participant}', participant)
+                          | replace('{location}', event.get('location', '') | string | trim)
+                          | replace('{start_time}', '%02d:%02d' | format(sh, sm))
+                          | replace('{end_time}', '%02d:%02d' | format(eh, em))
+                          | replace('{minutes}', minutes | string) -%}
+                        {%- set ns.keys = ns.keys + [key] -%}
+                        {%- set ns.items = ns.items + [{'key': key, 'due_minute': due_minute,
+                          'occurrence_date': day.date() | string, 'occurrence_offset': offset,
+                          'non_workday_behavior': event.get('non_workday_behavior', 'skip'),
+                          'child': event.get('child_name', '') | string | trim,
+                          'participant': participant, 'event': name,
+                          'child_order': event.get('child_order', 0) | int,
+                          'event_order': event.get('event_order', 0) | int,
+                          'reminder_order': ri, 'message': message,
+                          'sort_key': ('%020d' | format(due_minute)) ~ '|'
+                            ~ ('%06d' | format(event.get('child_order', 0) | int)) ~ '|'
+                            ~ ('%06d' | format(event.get('event_order', 0) | int)) ~ '|'
+                            ~ ('%06d' | format(ri))}] -%}
+                      {%- endif -%}
                     {%- endif -%}
-                  {%- endif -%}
                   {%- endif -%}
                 {%- endfor -%}
               {%- endif -%}
@@ -449,31 +432,105 @@ variables:
           {%- endif -%}
         {%- endfor -%}
       {%- endif -%}
-    {%- endfor -%}
-    {{- ns.items | sort(attribute='sort_key') | list -}}
+    {%- endfor -%}{{- ns.items | sort(attribute='sort_key') | list -}}
+  workday_configured: "{{ workday_entity_input | string | trim | length > 0 }}"
+  workday_query_enabled: "{{ workday_configured and states(workday_entity_input) not in ['unknown', 'unavailable'] }}"
+  workday_query_offsets: >-
+    {{ raw_candidates | selectattr('non_workday_behavior', 'eq', 'skip')
+      | map(attribute='occurrence_offset') | unique | sort | list }}
+  legacy_holiday_active: >-
+    {{ not workday_configured and makeup_holiday_entity_input | string | trim | length > 0
+      and is_state(makeup_holiday_entity_input, 'on') }}
+  workday_date_minus_2: "{{ (as_local(as_datetime(check_minute | int)).date() - timedelta(days=2)) | string }}"
+  workday_date_minus_1: "{{ (as_local(as_datetime(check_minute | int)).date() - timedelta(days=1)) | string }}"
+  workday_date_same: "{{ as_local(as_datetime(check_minute | int)).date() | string }}"
+  workday_date_plus_1: "{{ (as_local(as_datetime(check_minute | int)).date() + timedelta(days=1)) | string }}"
 
 conditions:
-  - alias: 沒有符合提醒時不改音量、不播放，也不呼叫任何媒體 action
+  - alias: Phase A 沒有候選時不查 Workday、不改音量、不播放
+    condition: template
+    value_template: "{{ raw_candidates | count > 0 }}"
+actions:
+  - &workday_minus_2
+    alias: 每個候選活動發生日最多查詢一次 Workday（D-2）
+    if:
+      - condition: template
+        value_template: "{{ workday_query_enabled and -2 in workday_query_offsets }}"
+    then:
+      - action: workday.check_date
+        target: {entity_id: "{{ workday_entity_input }}"}
+        data: {check_date: "{{ workday_date_minus_2 }}"}
+        response_variable: workday_response_minus_2
+        continue_on_error: true
+  - alias: 每個候選活動發生日最多查詢一次 Workday（D-1）
+    if:
+      - condition: template
+        value_template: "{{ workday_query_enabled and -1 in workday_query_offsets }}"
+    then:
+      - action: workday.check_date
+        target: {entity_id: "{{ workday_entity_input }}"}
+        data: {check_date: "{{ workday_date_minus_1 }}"}
+        response_variable: workday_response_minus_1
+        continue_on_error: true
+  - alias: 每個候選活動發生日最多查詢一次 Workday（D）
+    if:
+      - condition: template
+        value_template: "{{ workday_query_enabled and 0 in workday_query_offsets }}"
+    then:
+      - action: workday.check_date
+        target: {entity_id: "{{ workday_entity_input }}"}
+        data: {check_date: "{{ workday_date_same }}"}
+        response_variable: workday_response_same
+        continue_on_error: true
+  - alias: 每個候選活動發生日最多查詢一次 Workday（D+1）
+    if:
+      - condition: template
+        value_template: "{{ workday_query_enabled and 1 in workday_query_offsets }}"
+    then:
+      - action: workday.check_date
+        target: {entity_id: "{{ workday_entity_input }}"}
+        data: {check_date: "{{ workday_date_plus_1 }}"}
+        response_variable: workday_response_plus_1
+        continue_on_error: true
+  - variables:
+      matched_reminders: >-
+        {%- set ns = namespace(items=[]) -%}
+        {%- for item in raw_candidates -%}
+          {%- set keep = true -%}
+          {%- if item.non_workday_behavior == 'skip' -%}
+            {%- if workday_configured -%}
+              {%- if item.occurrence_offset == -2 -%}
+                {%- set response = workday_response_minus_2 if workday_response_minus_2 is defined else {} -%}
+              {%- elif item.occurrence_offset == -1 -%}
+                {%- set response = workday_response_minus_1 if workday_response_minus_1 is defined else {} -%}
+              {%- elif item.occurrence_offset == 0 -%}
+                {%- set response = workday_response_same if workday_response_same is defined else {} -%}
+              {%- else -%}
+                {%- set response = workday_response_plus_1 if workday_response_plus_1 is defined else {} -%}
+              {%- endif -%}
+              {%- set result = response.get(workday_entity_input, {}) if response is mapping else {} -%}
+              {%- if result is mapping and result.get('workday') is boolean -%}
+                {%- set keep = result.get('workday') -%}
+              {%- endif -%}
+            {%- elif legacy_holiday_active -%}{%- set keep = false -%}{%- endif -%}
+          {%- endif -%}
+          {%- if keep -%}{%- set ns.items = ns.items + [item] -%}{%- endif -%}
+        {%- endfor -%}{{- ns.items | sort(attribute='sort_key') | list -}}
+  - alias: Workday 篩選後沒有提醒時不碰播放器或 TTS
     condition: template
     value_template: "{{ matched_reminders | count > 0 }}"
   - alias: TTS 實體暫時不可用時安全跳過
     condition: template
     value_template: "{{ states(tts_entity_input) not in ['unknown', 'unavailable'] }}"
-
-actions:
   - variables:
       player_snapshots: >-
         {% set ns = namespace(items=[]) %}
         {% for player in media_players_input %}
           {% if states(player) not in ['unknown', 'unavailable'] %}
-            {% set ns.items = ns.items + [{
-              'entity_id': player,
-              'volume': state_attr(player, 'volume_level')
-                if restore_original_volume_input else none
-            }] %}
+            {% set ns.items = ns.items + [{'entity_id': player,
+              'volume': state_attr(player, 'volume_level') if restore_original_volume_input else none}] %}
           {% endif %}
-        {% endfor %}
-        {{ ns.items }}
+        {% endfor %}{{ ns.items }}
   - alias: 沒有可用播放器時安全結束
     condition: template
     value_template: "{{ player_snapshots | count > 0 }}"
@@ -482,10 +539,8 @@ actions:
       for_each: "{{ player_snapshots }}"
       sequence:
         - action: media_player.volume_set
-          target:
-            entity_id: "{{ repeat.item.entity_id }}"
-          data:
-            volume_level: "{{ announcement_volume_input | float(0.75) }}"
+          target: {entity_id: "{{ repeat.item.entity_id }}"}
+          data: {volume_level: "{{ announcement_volume_input | float(0.75) }}"}
           continue_on_error: true
   - alias: 依序播放本分鐘全部提醒
     repeat:
@@ -494,36 +549,28 @@ actions:
         - variables:
             announcement_message: "{{ repeat.item.message | trim }}"
             speech_wait_seconds: >-
-              {% set estimate = ((announcement_message | length) / 3)
-                | round(0, 'ceil') | int + 6 %}
-              {% set lower = minimum_tts_wait_input | int(8) %}
-              {% set upper = maximum_tts_wait_input | int(120) %}
-              {{ [[estimate, lower] | max, upper] | min }}
-        - alias: 每台播放器獨立播放；單台失敗不阻止其他播放器
-          repeat:
+              {% set estimate = ((announcement_message | length) / 3) | round(0, 'ceil') | int + 6 %}
+              {{ [[estimate, minimum_tts_wait_input | int(8)] | max,
+                maximum_tts_wait_input | int(120)] | min }}
+        - repeat:
             for_each: "{{ player_snapshots }}"
             sequence:
               - action: media_player.play_media
-                target:
-                  entity_id: "{{ repeat.item.entity_id }}"
+                target: {entity_id: "{{ repeat.item.entity_id }}"}
                 data:
                   media_content_id: >-
-                    {{ 'media-source://tts/' ~ tts_entity_input
-                       ~ '?message=' ~ (announcement_message | urlencode)
-                       ~ '&language=' ~ (tts_language_input | urlencode) }}
+                    {{ 'media-source://tts/' ~ tts_entity_input ~ '?message='
+                      ~ (announcement_message | urlencode) ~ '&language='
+                      ~ (tts_language_input | urlencode) }}
                   media_content_type: music
                   announce: "{{ attempt_media_resume_input }}"
                 continue_on_error: true
-        - alias: 依訊息長度等待，避免 action 返回後立即播放下一句
-          delay:
-            seconds: "{{ speech_wait_seconds }}"
+        - delay: {seconds: "{{ speech_wait_seconds }}"}
   - alias: 全部訊息完成後等待 buffering 離開（best effort）
     wait_template: >-
-      {{ player_snapshots
-         | map(attribute='entity_id')
-         | select('is_state', 'buffering') | list | count == 0 }}
-    timeout:
-      seconds: "{{ buffering_timeout_input | int(10) }}"
+      {{ player_snapshots | map(attribute='entity_id')
+        | select('is_state', 'buffering') | list | count == 0 }}
+    timeout: {seconds: "{{ buffering_timeout_input | int(10) }}"}
     continue_on_timeout: true
   - alias: 全部訊息後只恢復一次各播放器原始音量
     repeat:
@@ -534,8 +581,6 @@ actions:
               value_template: "{{ repeat.item.volume is number }}"
           then:
             - action: media_player.volume_set
-              target:
-                entity_id: "{{ repeat.item.entity_id }}"
-              data:
-                volume_level: "{{ repeat.item.volume }}"
+              target: {entity_id: "{{ repeat.item.entity_id }}"}
+              data: {volume_level: "{{ repeat.item.volume }}"}
               continue_on_error: true
