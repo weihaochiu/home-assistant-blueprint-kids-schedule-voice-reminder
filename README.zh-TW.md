@@ -1,6 +1,6 @@
 # 小孩行程與接送語音提醒 Blueprint
 
-![Version](https://img.shields.io/badge/version-v0.3.2-blue)
+![Version](https://img.shields.io/badge/version-v0.3.3-blue)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.1.0%2B-41BDF5)
 
 純 Home Assistant Automation Blueprint：用固定每週時段管理動態 Children／群組、
@@ -93,7 +93,9 @@ automation 使用 `queued`、`max: 20`。每次觸發保留自身 `trigger.now` 
 活動。placeholder 為 `{event}`、`{participant}`、`{location}`、`{start_time}`、
 `{end_time}`、`{minutes}`；0 句用 fallback、1 句固定、多句隨機，使用者文字不會二次執行
 Jinja。同分鐘所有提醒依 due、Child、Event、Reminder 順序播放；可用播放器只 snapshot／
-設定音量一次，全部訊息後恢復一次。announce/resume 為播放器相關 best effort。
+設定音量一次，全部訊息後恢復一次。多句提醒會更保守地保留估算語音 guard，並在播放器能
+可靠回報時使用 bounded state observation；無法可靠回報或卡住時採 deterministic fallback，
+不會無限阻塞 queue。announce/resume 仍為播放器相關 best effort。
 
 ## 從 v0.2／v0.1 升級
 
@@ -119,4 +121,4 @@ git diff --check
 ```
 
 另見 [設計](docs/DESIGN.md)、[HA response variable 相容性](docs/HA_RESPONSE_VARIABLE_COMPATIBILITY.md)、
-[人工驗收](docs/MANUAL_TEST_CHECKLIST.zh-TW.md) 與 [變更紀錄](CHANGELOG.md)。目前版本：**v0.3.2**。
+[人工驗收](docs/MANUAL_TEST_CHECKLIST.zh-TW.md) 與 [變更紀錄](CHANGELOG.md)。目前版本：**v0.3.3**。

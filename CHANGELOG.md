@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## v0.3.3 - 2026-08-21
+
+### Fixed
+
+- Harden sequential TTS completion between multiple reminders.
+- Add bounded player-state observation with deterministic estimated fallback.
+- Prevent stuck media-player states from blocking queued automation indefinitely.
+- Preserve v0.3.2 TTS initial-`unknown` availability handling.
+
+### Tests
+
+- Add active, idle, unavailable, multi-player, and stuck-state completion regressions.
+- Verify minimum/maximum guards, sequential restoration order, and announce wiring.
+
 ## v0.3.2 - 2026-08-21
 
 ### Fixed

@@ -1,6 +1,6 @@
 # Kids Schedule Voice Reminder — Design
 
-Version: v0.3.2
+Version: v0.3.3
 
 ## Model and compatibility
 
@@ -68,8 +68,36 @@ Assistant Core 2026.8.1 script execution; see
 
 Zero valid messages uses fallback, one is fixed, and many use `random`. Six
 placeholders are replaced literally and never re-evaluated as Jinja. Available
-player volumes snapshot/set once, all reminders play sequentially, waits are bounded,
-and numeric volumes restore once. Media announcement/resume remains best effort.
+player volumes snapshot/set once, all reminders play sequentially, and numeric
+volumes restore once after every reminder completes.
+
+Each reminder keeps the existing length estimate, clamped to the normalized minimum
+and maximum, as a non-shortening guard. During that guard a bounded `wait_template`
+observes `buffering` or `playing` on targets that were not already active at snapshot.
+`wait.remaining` completes the full estimate even when activity appears early. If
+activity was observed, a second bounded wait may extend completion until no observed
+target remains active, but the combined per-reminder wait never exceeds the maximum.
+No activity uses the original estimate as deterministic fallback; stuck active states
+time out and continue. The final buffering wait remains as a separately bounded
+post-playback settle guard before one-time volume restoration.
+
+This is intentionally best effort. Core defines `playing`, `buffering`, `paused`,
+`idle`, and `off`, but integrations need not emit every transition. In Apple TV
+2026.8.1, pyatv `Loading` maps to `idle`, and `announce` is accepted by the generic
+`play_media` schema but resume behavior remains integration-dependent. Initially
+active players are therefore excluded from completion observation so resumed media
+cannot hold the queue until every maximum timeout. Sources reviewed:
+
+- https://github.com/home-assistant/core/blob/2026.8.1/homeassistant/components/media_player/__init__.py
+- https://github.com/home-assistant/core/blob/2026.8.1/homeassistant/components/media_player/const.py
+- https://github.com/home-assistant/core/blob/2026.8.1/homeassistant/components/apple_tv/media_player.py
+- https://github.com/home-assistant/core/blob/2026.8.1/homeassistant/helpers/script.py
+- https://github.com/home-assistant/core/blob/2026.8.1/homeassistant/components/tts/media_source.py
+
+The existing `media-source://tts/<entity>?message=...&language=...` format and
+`media_content_type: music` remain aligned with Core. Media announcement/resume
+remains best effort.
+
 An existing TTS entity with initial state `unknown` is usable; a missing entity is
 distinguished through `states[entity_id]`, while `unavailable` remains blocked.
 Runtime wait inputs accept only non-boolean integer values inside their selector

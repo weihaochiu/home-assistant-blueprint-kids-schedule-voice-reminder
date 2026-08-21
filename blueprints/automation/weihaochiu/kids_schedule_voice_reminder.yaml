@@ -1,7 +1,7 @@
 blueprint:
-  name: Kids Schedule Voice Reminder（小孩行程與接送語音提醒）· v0.3.2
+  name: Kids Schedule Voice Reminder（小孩行程與接送語音提醒）· v0.3.3
   description: >-
-    版本：v0.3.2。最低 Home Assistant：2026.1.0。以動態 Children／群組、Events、
+    版本：v0.3.3。最低 Home Assistant：2026.1.0。以動態 Children／群組、Events、
     時段與提醒管理行程；可選 Calendar、Workday 或舊 helper 判斷活動發生日是否放假，
     並相容 v0.2 與 v0.1 Events。
   domain: automation
@@ -647,7 +647,15 @@ actions:
         {% for player in media_players_input %}
           {% if states(player) not in ['unknown', 'unavailable'] %}
             {% set ns.items = ns.items + [{'entity_id': player,
+              'initial_state': states(player),
               'volume': state_attr(player, 'volume_level') if restore_original_volume_input else none}] %}
+          {% endif %}
+        {% endfor %}{{ ns.items }}
+      state_observation_targets: >-
+        {% set ns = namespace(items=[]) %}
+        {% for player in player_snapshots %}
+          {% if player.initial_state not in ['buffering', 'playing'] %}
+            {% set ns.items = ns.items + [player.entity_id] %}
           {% endif %}
         {% endfor %}{{ ns.items }}
   - alias: 沒有可用播放器時安全結束
@@ -671,6 +679,9 @@ actions:
               {% set estimate = ((announcement_message | length) / 3) | round(0, 'ceil') | int + 6 %}
               {{ [[estimate, effective_minimum_tts_wait | int(8)] | max,
                 effective_maximum_tts_wait | int(120)] | min }}
+            player_completion_timeout_seconds: >-
+              {{ [(effective_maximum_tts_wait | int(120))
+                - (speech_wait_seconds | int(8)), 0] | max }}
         - repeat:
             for_each: "{{ player_snapshots }}"
             sequence:
@@ -684,8 +695,30 @@ actions:
                   media_content_type: music
                   announce: "{{ attempt_media_resume_input }}"
                 continue_on_error: true
-        - delay: {seconds: "{{ speech_wait_seconds }}"}
-  - alias: 全部訊息完成後等待 buffering 離開（best effort）
+        - alias: 在估算 guard 期間觀察可辨識的 active playback
+          wait_template: >-
+            {{ state_observation_targets | select('is_state', 'buffering') | list | count > 0
+              or state_observation_targets | select('is_state', 'playing') | list | count > 0 }}
+          timeout: {seconds: "{{ speech_wait_seconds }}"}
+          continue_on_timeout: true
+        - variables:
+            active_playback_observed: "{{ wait.completed | bool }}"
+            speech_guard_remaining_seconds: >-
+              {{ [[wait.remaining | float(0), 0] | max, speech_wait_seconds | float(0)] | min
+                if wait.completed else 0 }}
+        - alias: 即使 active state 提早出現仍完成整段估算 guard
+          delay: {seconds: "{{ speech_guard_remaining_seconds }}"}
+        - alias: 觀察到 active playback 時 bounded 等待其完成
+          if:
+            - condition: template
+              value_template: "{{ active_playback_observed }}"
+          then:
+            - wait_template: >-
+                {{ state_observation_targets | select('is_state', 'buffering') | list | count == 0
+                  and state_observation_targets | select('is_state', 'playing') | list | count == 0 }}
+              timeout: {seconds: "{{ player_completion_timeout_seconds }}"}
+              continue_on_timeout: true
+  - alias: 全部訊息完成後執行 final post-playback buffering settle guard
     wait_template: >-
       {{ player_snapshots | map(attribute='entity_id')
         | select('is_state', 'buffering') | list | count == 0 }}

@@ -1,6 +1,6 @@
 # Google Taiwan Holiday Calendar research
 
-Version: v0.3.2
+Version: v0.3.3
 Checked: 2026-08-21 (Asia/Taipei)
 
 ## Feed and verification

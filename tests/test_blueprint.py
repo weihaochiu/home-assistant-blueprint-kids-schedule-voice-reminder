@@ -131,6 +131,24 @@ def find_variable_template(value, name: str) -> str:
     raise KeyError(name)
 
 
+def find_action_by_alias(value, alias: str) -> dict:
+    if isinstance(value, dict):
+        if value.get("alias") == alias:
+            return value
+        for item in value.values():
+            try:
+                return find_action_by_alias(item, alias)
+            except KeyError:
+                pass
+    elif isinstance(value, list):
+        for item in value:
+            try:
+                return find_action_by_alias(item, alias)
+            except KeyError:
+                pass
+    raise KeyError(alias)
+
+
 def render_tts_availability(blueprint: dict, entity_state: str | None) -> tuple[bool, bool, bool]:
     entity_id = "tts.test_engine"
     values = {} if entity_state is None else {entity_id: entity_state}
@@ -180,6 +198,96 @@ def render_tts_wait_config(
         context["effective_buffering_timeout"],
         speech_wait,
     )
+
+
+def simulate_tts_completion(
+    blueprint: dict,
+    timeline: list[dict[str, str]],
+    *,
+    initial_states: dict[str, str] | None = None,
+    minimum: object = 8,
+    maximum: object = 120,
+    message: str = "",
+) -> dict[str, object]:
+    """Render the Blueprint completion templates against a state timeline."""
+    effective_minimum, effective_maximum, _, speech_wait = render_tts_wait_config(
+        blueprint, minimum, maximum, 10, message
+    )
+    initial = initial_states or {entity_id: "idle" for entity_id in timeline[0]}
+    player_snapshots = [
+        {"entity_id": entity_id, "initial_state": state, "volume": 0.5}
+        for entity_id, state in initial.items()
+    ]
+    current_states: dict[str, str] = {}
+    environment = NativeEnvironment(autoescape=False)
+    environment.filters["bool"] = bool
+    environment.tests["is_state"] = (
+        lambda entity_id, expected: current_states.get(entity_id, "unknown") == expected
+    )
+    target_template = find_variable_template(blueprint["actions"], "state_observation_targets")
+    observation_targets = environment.from_string(target_template).render(
+        player_snapshots=player_snapshots
+    )
+    context: dict[str, object] = {
+        "state_observation_targets": observation_targets,
+        "speech_wait_seconds": speech_wait,
+        "effective_maximum_tts_wait": effective_maximum,
+    }
+    timeout_template = find_variable_template(
+        blueprint["actions"], "player_completion_timeout_seconds"
+    )
+    completion_timeout = int(environment.from_string(timeout_template).render(**context))
+    active_wait = find_action_by_alias(
+        blueprint["actions"], "在估算 guard 期間觀察可辨識的 active playback"
+    )
+    completion_action = find_action_by_alias(
+        blueprint["actions"], "觀察到 active playback 時 bounded 等待其完成"
+    )
+
+    def states_at(second: int) -> dict[str, str]:
+        return timeline[min(second, len(timeline) - 1)]
+
+    observed_at: int | None = None
+    for second in range(speech_wait):
+        current_states.update(states_at(second))
+        if environment.from_string(active_wait["wait_template"]).render(**context):
+            observed_at = second
+            break
+    wait_result = {
+        "completed": observed_at is not None,
+        "remaining": speech_wait - observed_at if observed_at is not None else 0,
+    }
+    context["wait"] = wait_result
+    context["active_playback_observed"] = environment.from_string(
+        find_variable_template(blueprint["actions"], "active_playback_observed")
+    ).render(**context)
+    guard_remaining = float(
+        environment.from_string(
+            find_variable_template(blueprint["actions"], "speech_guard_remaining_seconds")
+        ).render(**context)
+    )
+    elapsed = speech_wait if observed_at is None else observed_at + guard_remaining
+    timed_out = False
+    if context["active_playback_observed"]:
+        completion_wait = completion_action["then"][0]
+        for extra in range(completion_timeout + 1):
+            current_states.update(states_at(int(elapsed + extra)))
+            if environment.from_string(completion_wait["wait_template"]).render(**context):
+                elapsed += extra
+                break
+        else:
+            elapsed += completion_timeout
+            timed_out = True
+
+    return {
+        "elapsed": elapsed,
+        "minimum": effective_minimum,
+        "maximum": effective_maximum,
+        "speech_wait": speech_wait,
+        "observed": context["active_playback_observed"],
+        "timed_out": timed_out,
+        "targets": observation_targets,
+    }
 
 
 def parse_clock(value: object) -> time | None:
@@ -499,13 +607,13 @@ def test_yaml_loads_and_metadata_is_correct(blueprint: dict) -> None:
     assert metadata["author"] == "weihaochiu"
     assert metadata["source_url"] == SOURCE_URL
     assert metadata["homeassistant"]["min_version"] == "2026.1.0"
-    assert "v0.3.2" in metadata["name"]
-    assert "v0.3.2" in metadata["description"]
+    assert "v0.3.3" in metadata["name"]
+    assert "v0.3.3" in metadata["description"]
 
 
 def test_version_is_consistent_across_release_surfaces(blueprint: dict) -> None:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    assert version == "v0.3.2"
+    assert version == "v0.3.3"
     for filename in (
         "README.md",
         "README.zh-TW.md",
@@ -1365,10 +1473,30 @@ def test_playback_snapshots_once_plays_all_then_restores_once(blueprint: dict, b
     assert "repeat.item.volume is number" in blueprint_text
     assert "player_snapshots if restore_original_volume_input else []" in blueprint_text
     assert "continue_on_error: true" in blueprint_text
+    assert blueprint_text.count("state_attr(player, 'volume_level')") == 1
     assert blueprint_text.count("action: media_player.volume_set") == 2
     play_position = blueprint_text.index("依序播放本分鐘全部提醒")
+    completion_position = blueprint_text.index("觀察到 active playback 時 bounded 等待其完成")
     restore_position = blueprint_text.index("全部訊息後只恢復一次")
-    assert play_position < restore_position
+    assert play_position < completion_position < restore_position
+
+
+def test_multiple_reminders_remain_one_sequential_outer_repeat(blueprint: dict) -> None:
+    playback = find_action_by_alias(blueprint["actions"], "依序播放本分鐘全部提醒")
+    assert playback["repeat"]["for_each"] == "{{ matched_reminders }}"
+    sequence = playback["repeat"]["sequence"]
+    play_media_calls = [
+        node for node in walk(sequence)
+        if isinstance(node, dict) and node.get("action") == "media_player.play_media"
+    ]
+    assert len(play_media_calls) == 1
+    active_wait = find_action_by_alias(
+        sequence, "在估算 guard 期間觀察可辨識的 active playback"
+    )
+    completion = find_action_by_alias(
+        sequence, "觀察到 active playback 時 bounded 等待其完成"
+    )
+    assert 0 < sequence.index(active_wait) < sequence.index(completion)
 
 
 def test_tts_media_source_wait_and_announce_wiring(blueprint_text: str) -> None:
@@ -1383,6 +1511,129 @@ def test_tts_media_source_wait_and_announce_wiring(blueprint_text: str) -> None:
     assert "effective_minimum_tts_wait" in blueprint_text
     assert "effective_maximum_tts_wait" in blueprint_text
     assert "effective_buffering_timeout" in blueprint_text
+
+
+@pytest.mark.parametrize(("attempt_resume", "expected"), [(False, False), (True, True)])
+def test_announce_false_and_true_render_without_rewiring(
+    blueprint: dict, attempt_resume: bool, expected: bool
+) -> None:
+    play_media = next(
+        node for node in walk(blueprint["actions"])
+        if isinstance(node, dict) and node.get("action") == "media_player.play_media"
+    )
+    rendered = NativeEnvironment(autoescape=False).from_string(
+        play_media["data"]["announce"]
+    ).render(attempt_media_resume_input=attempt_resume)
+    assert rendered is expected
+
+
+def test_completion_waits_are_bounded_and_final_settle_is_retained(blueprint: dict) -> None:
+    active_wait = find_action_by_alias(
+        blueprint["actions"], "在估算 guard 期間觀察可辨識的 active playback"
+    )
+    completion = find_action_by_alias(
+        blueprint["actions"], "觀察到 active playback 時 bounded 等待其完成"
+    )["then"][0]
+    final_settle = find_action_by_alias(
+        blueprint["actions"], "全部訊息完成後執行 final post-playback buffering settle guard"
+    )
+    assert active_wait["timeout"] == {"seconds": "{{ speech_wait_seconds }}"}
+    assert completion["timeout"] == {"seconds": "{{ player_completion_timeout_seconds }}"}
+    assert final_settle["timeout"] == {
+        "seconds": "{{ effective_buffering_timeout | int(10) }}"
+    }
+    assert all(
+        action["continue_on_timeout"] is True
+        for action in (active_wait, completion, final_settle)
+    )
+
+
+def test_immediately_idle_player_still_obeys_minimum_guard(blueprint: dict) -> None:
+    result = simulate_tts_completion(blueprint, [{"media_player.a": "idle"}])
+    assert result["observed"] is False
+    assert result["elapsed"] == result["speech_wait"]
+    assert result["elapsed"] >= result["minimum"] == 8
+
+
+def test_buffering_playing_idle_transition_completes_after_active_playback(
+    blueprint: dict,
+) -> None:
+    timeline = (
+        [{"media_player.a": "buffering"}]
+        + [{"media_player.a": "playing"}] * 9
+        + [{"media_player.a": "idle"}]
+    )
+    result = simulate_tts_completion(blueprint, timeline)
+    assert result["observed"] is True
+    assert result["elapsed"] == 10
+    assert result["timed_out"] is False
+
+
+@pytest.mark.parametrize("stuck_state", ["playing", "buffering"])
+def test_stuck_active_player_hits_hard_timeout_and_continues(
+    blueprint: dict, stuck_state: str
+) -> None:
+    result = simulate_tts_completion(
+        blueprint,
+        [{"media_player.a": stuck_state}],
+        initial_states={"media_player.a": "idle"},
+    )
+    assert result["observed"] is True
+    assert result["timed_out"] is True
+    assert result["elapsed"] == result["maximum"] == 120
+
+
+def test_player_becoming_unavailable_completes_without_error(blueprint: dict) -> None:
+    timeline = (
+        [{"media_player.a": "playing"}] * 10
+        + [{"media_player.a": "unavailable"}]
+    )
+    result = simulate_tts_completion(
+        blueprint, timeline, initial_states={"media_player.a": "idle"}
+    )
+    assert result["observed"] is True
+    assert result["elapsed"] == 10
+    assert result["timed_out"] is False
+
+
+def test_multiple_players_wait_for_every_active_target(blueprint: dict) -> None:
+    timeline = [
+        {"media_player.a": "idle", "media_player.b": "playing"}
+    ] * 12 + [{"media_player.a": "idle", "media_player.b": "idle"}]
+    result = simulate_tts_completion(
+        blueprint,
+        timeline,
+        initial_states={"media_player.a": "idle", "media_player.b": "idle"},
+    )
+    assert result["elapsed"] == 12
+    assert result["timed_out"] is False
+
+
+def test_unavailable_player_does_not_block_other_active_player(blueprint: dict) -> None:
+    timeline = [
+        {"media_player.a": "playing", "media_player.b": "unavailable"}
+    ] * 11 + [{"media_player.a": "idle", "media_player.b": "unavailable"}]
+    result = simulate_tts_completion(
+        blueprint,
+        timeline,
+        initial_states={"media_player.a": "idle", "media_player.b": "idle"},
+    )
+    assert result["elapsed"] == 11
+    assert result["timed_out"] is False
+
+
+def test_initially_active_player_uses_estimate_fallback_instead_of_resumed_media(
+    blueprint: dict,
+) -> None:
+    result = simulate_tts_completion(
+        blueprint,
+        [{"media_player.a": "playing"}],
+        initial_states={"media_player.a": "playing"},
+    )
+    assert result["targets"] == []
+    assert result["observed"] is False
+    assert result["elapsed"] == result["speech_wait"]
+    assert result["timed_out"] is False
 
 
 def test_tts_unknown_state_is_allowed_for_existing_entity(blueprint: dict) -> None:

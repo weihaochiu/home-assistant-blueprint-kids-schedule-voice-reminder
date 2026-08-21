@@ -1,6 +1,6 @@
 # Kids Schedule Voice Reminder Blueprint
 
-![Version](https://img.shields.io/badge/version-v0.3.2-blue)
+![Version](https://img.shields.io/badge/version-v0.3.3-blue)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.1.0%2B-41BDF5)
 
 A pure Home Assistant automation Blueprint for fixed weekly family schedules,
@@ -84,7 +84,11 @@ supported. Messages support `{event}`, `{participant}`, `{location}`, `{start_ti
 `{end_time}`, and `{minutes}`. Zero valid messages uses a fallback, one is fixed,
 and multiple entries are randomly selected without evaluating user text as Jinja.
 All same-minute reminders play in due/Child/Event/Reminder order; player volumes
-snapshot/set once and restore once. Announcement/resume is player-dependent.
+snapshot/set once and restore once. Consecutive reminders conservatively keep the
+estimated speech guard, then use bounded player-state observation when available.
+Players that do not report reliable playback states use the deterministic estimate,
+so stuck states cannot block the queue indefinitely. Announcement/resume remains
+player-dependent.
 
 ## v0.2 and v0.1 migration
 
@@ -115,4 +119,4 @@ git diff --check
 See [DESIGN.md](docs/DESIGN.md),
 [HA_RESPONSE_VARIABLE_COMPATIBILITY.md](docs/HA_RESPONSE_VARIABLE_COMPATIBILITY.md),
 the [manual checklist](docs/MANUAL_TEST_CHECKLIST.zh-TW.md), and
-[CHANGELOG.md](CHANGELOG.md). Current version: **v0.3.2**.
+[CHANGELOG.md](CHANGELOG.md). Current version: **v0.3.3**.

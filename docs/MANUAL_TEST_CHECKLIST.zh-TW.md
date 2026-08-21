@@ -1,4 +1,4 @@
-# Home Assistant 實機測試清單 — v0.3.2
+# Home Assistant 實機測試清單 — v0.3.3
 
 請記錄 HA 版本、TTS、播放器／Calendar integration、automation trace 與結果；分享前遮蔽私人資料。
 
@@ -58,3 +58,7 @@
 - [ ] minimum=60／maximum=10 時 runtime 正規化為 10／60，且不 exception
 - [ ] HomePod 第一次 TTS、volume restore、announce、media resume 實機行為
 - [ ] 無 volume_level、buffering timeout 與其他 announce/resume 失敗均安全
+- [ ] 連續兩句長 TTS 前一句完成後才開始下一句，不互相截斷
+- [ ] HomePod state 未進入 `playing` 時仍依 estimate fallback 完成 automation
+- [ ] 模擬／重現 stuck `buffering` 或 `playing` 時，hard timeout 後 queue 繼續
+- [ ] 多播放器其中一台變為 `unavailable` 時，其餘播放器仍能完成並恢復音量
