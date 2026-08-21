@@ -21,7 +21,9 @@ Core 2026.8.1. Selector-level options such as `multiple`, `label_field`, and
 `description_field` remain on the Object selector config rather than its fields.
 Children and Legacy deliberately share the `reminders_selector` YAML anchor, so the
 same validated Messages schema serves both paths. An offline recursive validator and
-positive/negative pytest regressions enforce this schema before release.
+positive/negative pytest regressions enforce this schema before release. The
+repository-scoped validator is aligned with the HA Core 2026.8.1 selector shapes used
+by this Blueprint; it is not a replacement for Home Assistant's Blueprint loader.
 Schema source:
 https://github.com/home-assistant/core/blob/2026.8.1/homeassistant/helpers/selector.py
 

@@ -12,6 +12,8 @@ All notable changes to this project are documented here.
 ### Tests
 
 - Add strict recursive Home Assistant 2026.8.1 Object selector schema validation.
+- Run the standalone validator in CI and reject unknown selector kinds, invalid
+  Choose metadata, missing choices/selectors, and direct nested Choose selectors.
 
 ## v0.3.3 - 2026-08-21
 

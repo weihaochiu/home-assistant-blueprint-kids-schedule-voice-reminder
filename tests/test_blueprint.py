@@ -6,6 +6,8 @@ from datetime import date, datetime, time, timedelta
 import importlib
 from pathlib import Path
 import re
+import subprocess
+import sys
 from urllib.parse import parse_qs, quote_plus, urlparse
 
 from jinja2 import Environment
@@ -14,8 +16,11 @@ import pytest
 import yaml
 
 from scripts.validate_ha_selector_schema import (
+    CHOOSE_SELECTOR_CHOICE_ALLOWED_KEYS,
+    CHOOSE_SELECTOR_CONFIG_ALLOWED_KEYS,
     OBJECT_SELECTOR_CONFIG_ALLOWED_KEYS,
     OBJECT_SELECTOR_FIELD_ALLOWED_KEYS,
+    SUPPORTED_SELECTOR_TYPES,
     validate_blueprint_selectors,
     validate_selector,
 )
@@ -30,6 +35,7 @@ BLUEPRINT_PATH = (
     / "kids_schedule_voice_reminder.yaml"
 )
 FIXTURE_PATH = ROOT / "tests" / "fixtures" / "events.yaml"
+SELECTOR_VALIDATOR_PATH = ROOT / "scripts" / "validate_ha_selector_schema.py"
 SOURCE_URL = (
     "https://github.com/weihaochiu/"
     "home-assistant-blueprint-kids-schedule-voice-reminder/blob/main/"
@@ -1428,12 +1434,13 @@ def test_relative_modes_filter_by_occurrence_date(
 
 def test_nested_selectors_follow_official_recursive_shape(blueprint: dict) -> None:
     """Object fields recursively contain exactly one registered selector type."""
-    known = {"object", "text", "boolean", "select", "time", "number", "choose", "entity"}
+    observed: set[str] = set()
 
     def validate(selector: dict) -> None:
         assert isinstance(selector, dict) and len(selector) == 1
         kind, config = next(iter(selector.items()))
-        assert kind in known
+        observed.add(kind)
+        assert kind in SUPPORTED_SELECTOR_TYPES
         if kind == "object" and isinstance(config, dict):
             for field in config.get("fields", {}).values():
                 validate(field["selector"])
@@ -1444,6 +1451,7 @@ def test_nested_selectors_follow_official_recursive_shape(blueprint: dict) -> No
     inputs = flatten_inputs(blueprint["blueprint"]["input"])
     for item in inputs.values():
         validate(item["selector"])
+    assert observed == SUPPORTED_SELECTOR_TYPES
 
 
 def test_object_selector_fields_only_use_ha_supported_metadata(
@@ -1487,10 +1495,182 @@ def test_object_selector_validator_distinguishes_config_from_field_metadata() ->
     ]
 
 
+def test_object_selector_without_fields_remains_valid() -> None:
+    assert validate_selector({"object": None}, "test") == []
+    assert validate_selector({"object": {"read_only": False}}, "test") == []
+
+
 def test_selector_validator_rejects_multiple_selector_types() -> None:
     assert validate_selector({"text": None, "number": None}, "test") == [
         "test must contain exactly one selector type; found keys: ['number', 'text']"
     ]
+
+
+def test_selector_validator_rejects_unknown_selector_type() -> None:
+    assert validate_selector({"definitely_not_a_ha_selector": None}, "test") == [
+        "test uses unknown or unsupported selector type: definitely_not_a_ha_selector"
+    ]
+
+
+def test_choose_selector_matches_ha_supported_metadata() -> None:
+    assert CHOOSE_SELECTOR_CONFIG_ALLOWED_KEYS == {
+        "choices",
+        "translation_key",
+        "read_only",
+    }
+    assert CHOOSE_SELECTOR_CHOICE_ALLOWED_KEYS == {"selector"}
+    legal = {
+        "choose": {
+            "choices": {"one": {"selector": {"text": None}}},
+            "translation_key": "timing",
+            "read_only": False,
+        }
+    }
+    assert validate_selector(legal, "test") == []
+
+
+def test_choose_selector_rejects_missing_choices() -> None:
+    assert validate_selector({"choose": {}}, "test") == [
+        "test.choose is missing required choices"
+    ]
+
+
+def test_choose_selector_rejects_unsupported_config() -> None:
+    selector = {
+        "choose": {
+            "choices": {"one": {"selector": {"text": None}}},
+            "description": "illegal",
+        }
+    }
+    assert validate_selector(selector, "test") == [
+        "test.choose has unsupported config keys: ['description']"
+    ]
+
+
+def test_choose_selector_rejects_choice_without_selector() -> None:
+    assert validate_selector({"choose": {"choices": {"bad": {}}}}, "test") == [
+        "test.choose.choices.bad is missing required selector"
+    ]
+
+
+def test_choose_selector_rejects_unsupported_choice_metadata() -> None:
+    selector = {
+        "choose": {
+            "choices": {
+                "bad": {
+                    "description": "illegal",
+                    "selector": {"text": None},
+                }
+            }
+        }
+    }
+    assert validate_selector(selector, "test") == [
+        "test.choose.choices.bad has unsupported metadata keys: ['description']"
+    ]
+
+
+def test_choose_selector_rejects_direct_nested_choose() -> None:
+    selector = {
+        "choose": {
+            "choices": {
+                "bad": {
+                    "selector": {
+                        "choose": {
+                            "choices": {
+                                "nested": {"selector": {"text": None}}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert validate_selector(selector, "test") == [
+        "test.choose.choices.bad.selector: nested choose selectors are not allowed"
+    ]
+
+
+def run_selector_validator(path: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(SELECTOR_VALIDATOR_PATH), str(path)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+
+def write_selector_blueprint(path: Path, selector: dict) -> None:
+    blueprint = {"blueprint": {"input": {"test": {"selector": selector}}}}
+    path.write_text(
+        yaml.safe_dump(blueprint, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
+def test_selector_validator_cli_accepts_production_blueprint() -> None:
+    result = run_selector_validator(BLUEPRINT_PATH)
+    assert result.returncode == 0
+    assert "repository selector shapes: PASS" in result.stdout
+
+
+def test_selector_validator_cli_rejects_illegal_object_field(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "invalid_object.yaml"
+    write_selector_blueprint(
+        path,
+        {
+            "object": {
+                "fields": {
+                    "message": {
+                        "label": "Message",
+                        "description": "illegal",
+                        "selector": {"text": None},
+                    }
+                }
+            }
+        },
+    )
+    result = run_selector_validator(path)
+    assert result.returncode == 1
+    assert "fields.message" in result.stdout
+    assert "description" in result.stdout
+
+
+def test_selector_validator_cli_rejects_direct_nested_choose(tmp_path: Path) -> None:
+    path = tmp_path / "invalid_nested_choose.yaml"
+    write_selector_blueprint(
+        path,
+        {
+            "choose": {
+                "choices": {
+                    "bad": {
+                        "selector": {
+                            "choose": {
+                                "choices": {
+                                    "nested": {"selector": {"text": None}}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    )
+    result = run_selector_validator(path)
+    assert result.returncode == 1
+    assert "nested choose selectors are not allowed" in result.stdout
+
+
+def test_selector_validator_cli_reports_yaml_parse_failure(tmp_path: Path) -> None:
+    path = tmp_path / "invalid_yaml.yaml"
+    path.write_text("blueprint: [", encoding="utf-8")
+    result = run_selector_validator(path)
+    assert result.returncode == 2
+    assert "Unable to parse" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 @pytest.mark.parametrize(("raw_candidates", "expected"), [([], False), ([{"key": "due"}], True)])

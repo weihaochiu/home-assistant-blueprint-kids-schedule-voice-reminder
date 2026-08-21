@@ -1,9 +1,10 @@
-"""Validate Blueprint Object selectors against Home Assistant 2026.8.1."""
+"""Check repository selector shapes against Home Assistant Core 2026.8.1."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
 from typing import Any
 
 import yaml
@@ -26,6 +27,18 @@ OBJECT_SELECTOR_CONFIG_ALLOWED_KEYS = {
     "translation_key",
     "read_only",
 }
+CHOOSE_SELECTOR_CONFIG_ALLOWED_KEYS = {"choices", "translation_key", "read_only"}
+CHOOSE_SELECTOR_CHOICE_ALLOWED_KEYS = {"selector"}
+SUPPORTED_SELECTOR_TYPES = {
+    "boolean",
+    "choose",
+    "entity",
+    "number",
+    "object",
+    "select",
+    "text",
+    "time",
+}
 
 
 class BlueprintLoader(yaml.SafeLoader):
@@ -38,7 +51,7 @@ BlueprintLoader.add_constructor(
 
 
 def validate_selector(selector: Any, path: str) -> list[str]:
-    """Return Object selector schema errors from one recursive selector tree."""
+    """Return repository-scoped structural errors from one selector tree."""
     errors: list[str] = []
     if not isinstance(selector, dict):
         return [f"{path} must be a mapping with exactly one selector type"]
@@ -49,6 +62,9 @@ def validate_selector(selector: Any, path: str) -> list[str]:
         ]
 
     selector_type, config = next(iter(selector.items()))
+    if selector_type not in SUPPORTED_SELECTOR_TYPES:
+        return [f"{path} uses unknown or unsupported selector type: {selector_type}"]
+
     if selector_type == "object" and config is not None and not isinstance(config, dict):
         errors.append(f"{path}.object config must be a mapping or null")
         return errors
@@ -85,24 +101,53 @@ def validate_selector(selector: Any, path: str) -> list[str]:
                 validate_selector(field_config["selector"], f"{field_path}.selector")
             )
 
-    if selector_type == "choose" and not isinstance(config, dict):
+    if selector_type != "choose":
+        return errors
+    if not isinstance(config, dict):
         errors.append(f"{path}.choose config must be a mapping")
-    elif selector_type == "choose":
-        choices = config.get("choices", {})
-        if not isinstance(choices, dict):
-            errors.append(f"{path}.choose.choices must be a mapping")
-        else:
-            for choice_name, choice_config in choices.items():
-                choice_path = f"{path}.choose.choices.{choice_name}"
-                if not isinstance(choice_config, dict) or "selector" not in choice_config:
-                    errors.append(f"{choice_path} must contain selector")
-                    continue
-                errors.extend(
-                    validate_selector(
-                        choice_config["selector"],
-                        f"{choice_path}.selector",
-                    )
-                )
+        return errors
+
+    unsupported_config = set(config) - CHOOSE_SELECTOR_CONFIG_ALLOWED_KEYS
+    if unsupported_config:
+        errors.append(
+            f"{path}.choose has unsupported config keys: {sorted(unsupported_config)}"
+        )
+    if "choices" not in config:
+        errors.append(f"{path}.choose is missing required choices")
+        return errors
+
+    choices = config["choices"]
+    if not isinstance(choices, dict):
+        errors.append(f"{path}.choose.choices must be a mapping")
+        return errors
+    for choice_name, choice_config in choices.items():
+        choice_path = f"{path}.choose.choices.{choice_name}"
+        if not isinstance(choice_config, dict):
+            errors.append(f"{choice_path} must be a mapping")
+            continue
+        unsupported_choice = (
+            set(choice_config) - CHOOSE_SELECTOR_CHOICE_ALLOWED_KEYS
+        )
+        if unsupported_choice:
+            errors.append(
+                f"{choice_path} has unsupported metadata keys: "
+                f"{sorted(unsupported_choice)}"
+            )
+        if "selector" not in choice_config:
+            errors.append(f"{choice_path} is missing required selector")
+            continue
+
+        choice_selector_path = f"{choice_path}.selector"
+        choice_selector = choice_config["selector"]
+        errors.extend(validate_selector(choice_selector, choice_selector_path))
+        if (
+            isinstance(choice_selector, dict)
+            and len(choice_selector) == 1
+            and "choose" in choice_selector
+        ):
+            errors.append(
+                f"{choice_selector_path}: nested choose selectors are not allowed"
+            )
     return errors
 
 
@@ -138,14 +183,25 @@ def main() -> int:
         help=f"Blueprint YAML path (default: {DEFAULT_BLUEPRINT_PATH})",
     )
     args = parser.parse_args()
-    with args.blueprint.open(encoding="utf-8") as stream:
-        blueprint = yaml.load(stream, Loader=BlueprintLoader)
+    try:
+        with args.blueprint.open(encoding="utf-8") as stream:
+            blueprint = yaml.load(stream, Loader=BlueprintLoader)
+    except OSError as error:
+        print(f"Unable to read {args.blueprint}: {error}", file=sys.stderr)
+        return 2
+    except yaml.YAMLError as error:
+        print(f"Unable to parse {args.blueprint}: {error}", file=sys.stderr)
+        return 2
+    if not isinstance(blueprint, dict):
+        print(f"{args.blueprint}: Blueprint root must be a mapping", file=sys.stderr)
+        return 1
+
     errors = validate_blueprint_selectors(blueprint)
     if errors:
         for error in errors:
             print(error)
         return 1
-    print("Home Assistant 2026.8.1 Object selector schema: PASS")
+    print("HA Core 2026.8.1 repository selector shapes: PASS")
     return 0
 
 
